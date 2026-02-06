@@ -199,13 +199,33 @@ def _accept_chat(chat_id: str, chat_type: str, group_chat_id: str, admin_id: str
     return chat_id == group_chat_id
 
 
+def _send_admin_id_hint(chat_id: str, user_id: int | str) -> None:
+    """Отправить в личку подсказку: ваш user ID и как добавить TELEGRAM_ADMIN_ID (Railway / .env)."""
+    uid = str(user_id)
+    hint = (
+        "👤 *Ваш Telegram User ID:* `{uid}`\n\n"
+        "Чтобы управлять ботом только из лички (отчёты по-прежнему в группу), добавьте переменную:\n\n"
+        "• *Railway:* Variables → `TELEGRAM_ADMIN_ID` = `{uid}`\n"
+        "• *Локально:* в `.env` строка `TELEGRAM_ADMIN_ID={uid}`\n\n"
+        "После сохранения перезапустите приложение."
+    ).format(uid=uid)
+    _send(chat_id, hint)
+
+
 def _process_update(group_chat_id: str, admin_id: str | None, update: dict) -> None:
     """Разобрать один update и вызвать нужный обработчик."""
     if "message" in update:
         msg = update["message"]
         chat = msg.get("chat", {})
         chat_id = str(chat.get("id", ""))
-        if not _accept_chat(chat_id, chat.get("type", ""), group_chat_id, admin_id):
+        chat_type = chat.get("type", "")
+        # Если TELEGRAM_ADMIN_ID не задан и написали из лички — показываем user ID и подсказку для Railway/.env
+        if not admin_id and chat_type == "private":
+            user_id = msg.get("from", {}).get("id")
+            if user_id is not None:
+                _send_admin_id_hint(chat_id, user_id)
+            return
+        if not _accept_chat(chat_id, chat_type, group_chat_id, admin_id):
             return
         text = (msg.get("text") or "").strip()
         _handle_message(chat_id, text)
@@ -214,7 +234,14 @@ def _process_update(group_chat_id: str, admin_id: str | None, update: dict) -> N
         cq = update["callback_query"]
         chat = cq.get("message", {}).get("chat", {})
         chat_id = str(chat.get("id", ""))
-        if not _accept_chat(chat_id, chat.get("type", ""), group_chat_id, admin_id):
+        chat_type = chat.get("type", "")
+        if not admin_id and chat_type == "private":
+            user_id = cq.get("from", {}).get("id")
+            if user_id is not None:
+                _send_admin_id_hint(chat_id, user_id)
+            _api("answerCallbackQuery", {"callback_query_id": cq["id"]})
+            return
+        if not _accept_chat(chat_id, chat_type, group_chat_id, admin_id):
             return
         _handle_callback(chat_id, cq["id"], (cq.get("data") or "").strip())
         return
