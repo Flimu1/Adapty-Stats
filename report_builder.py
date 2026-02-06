@@ -35,7 +35,11 @@ def build_report_text() -> str:
     """
     rows = fetch_all_metrics()
     date_str = datetime.now().strftime("%d.%m.%Y")
-    lines = [f"📊 Отчёт на {date_str}", ""]
+    lines = [
+        f"📊 Отчёт на {date_str}",
+        "Данные за текущий месяц, в скобках — прирост за сутки.",
+        "",
+    ]
     for r in rows:
         name = r.get("name", "App")
         mrr_total = r.get("mrr_total") or 0

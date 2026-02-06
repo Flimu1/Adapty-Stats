@@ -128,14 +128,19 @@ def _debug_adapty_response() -> None:
     """
     Выполняет один запрос к Adapty (MRR для первого приложения) и выводит сырой ответ.
     Запуск: python main.py --debug-adapty (или LOG_LEVEL=DEBUG python main.py --test-send).
+    Даты запроса — в timezone отчёта (по умолчанию Europe/Minsk, GMT+3).
     """
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
     path = get_adapty_analytics_path()
-    tz = get_timezone()
+    tz_str = get_timezone()
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = ZoneInfo("Europe/Minsk")
     app = apps[0]
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-    to_today = datetime.utcnow()
+    to_today = datetime.now(tz)
     from_today = to_today - timedelta(hours=24)
     body = {
         "chart_id": "mrr",
@@ -148,7 +153,7 @@ def _debug_adapty_response() -> None:
     headers = {
         "Authorization": f"Api-Key {app.api_key}",
         "Content-Type": "application/json",
-        "Adapty-Tz": tz,
+        "Adapty-Tz": tz_str,
     }
     for chart_id in ("mrr", "installs"):
         body_chart = {**body, "chart_id": chart_id}
@@ -266,6 +271,7 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
     Собирает метрики по всем приложениям параллельно.
     - MRR и Installs: за текущий месяц (основная цифра), в скобках — прирост за сутки.
     - Дельта MRR: по календарным дням в timezone отчёта (вчера/сегодня), как в дашборде Adapty.
+    - Установки «за сутки»: один календарный день «сегодня» (день, когда идёт отчёт/скрапинг).
     Возвращает: name, mrr_total, mrr_delta_24h, installs_total, installs_delta_24h.
     """
     apps = get_adapty_apps()
@@ -287,9 +293,6 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
     date_today = datetime(today.year, today.month, today.day)
     date_yesterday = datetime(yesterday.year, yesterday.month, yesterday.day)
 
-    now_utc = datetime.utcnow()
-    now_24h_ago = now_utc - timedelta(hours=24)
-
     results: list[dict[str, Any]] = []
 
     def job(app_index: int, app_key: str, app_name: str) -> dict[str, Any]:
@@ -306,11 +309,11 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
         )
         mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
 
-        # Прирост установок за сутки: последние 24ч
-        inst_24h = _fetch_chart(
-            app_key, base_url, path, tz_str, "installs", now_24h_ago, now_utc
+        # Установки за сегодня: один календарный день (день скрапинга/отчёта)
+        inst_today = _fetch_chart(
+            app_key, base_url, path, tz_str, "installs", date_today, date_today
         )
-        inst_delta_24h = int(inst_24h) if inst_24h is not None else 0
+        inst_delta_24h = int(inst_today) if inst_today is not None else 0
 
         return {
             "index": app_index,
