@@ -6,7 +6,7 @@ from typing import Optional
 
 import requests
 
-from config import get_telegram_chat_id, get_telegram_token
+from config import get_telegram_chat_id, get_telegram_token, get_telegram_topic_id
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ TELEGRAM_API = "https://api.telegram.org/bot"
 
 
 def send_message(text: str, parse_mode: str = "Markdown") -> bool:
-    """Отправляет сообщение в чат. Возвращает True при успехе."""
+    """Отправляет сообщение в чат (опционально в указанный топик). Возвращает True при успехе."""
     token = get_telegram_token()
     chat_id = get_telegram_chat_id()
     url = f"{TELEGRAM_API}{token}/sendMessage"
@@ -24,6 +24,9 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    topic_id = get_telegram_topic_id()
+    if topic_id is not None:
+        payload["message_thread_id"] = topic_id
     try:
         r = requests.post(url, json=payload, timeout=15)
         r.raise_for_status()

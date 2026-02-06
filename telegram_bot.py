@@ -10,7 +10,13 @@ import time
 
 import requests
 
-from config import get_report_time, get_telegram_chat_id, get_telegram_token, set_report_time
+from config import (
+    get_report_time,
+    get_telegram_admin_id,
+    get_telegram_chat_id,
+    get_telegram_token,
+    set_report_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,11 @@ logger = logging.getLogger(__name__)
 _pending_state: dict[str, str] = {}
 
 TELEGRAM_API = "https://api.telegram.org/bot"
+
+def _is_admin_only_mode() -> bool:
+    """True, если управление только из лички (задан TELEGRAM_ADMIN_ID)."""
+    return get_telegram_admin_id() is not None
+
 
 # Триггеры для ручного сбора (команда или текст кнопки)
 COLLECT_TRIGGERS = frozenset({
@@ -63,10 +74,11 @@ def _answer_callback(callback_query_id: str, text: str | None = None) -> bool:
     return result is not None and result.get("ok") is True
 
 
-def _collect_and_send(chat_id: str) -> tuple[bool, str]:
+def _collect_and_send(chat_id: str, to_group: bool = False) -> tuple[bool, str]:
     """
-    Собрать актуальные данные с Adapty и отправить отчёт в чат.
-    Возвращает (успех, сообщение для пользователя).
+    Собрать данные с Adapty и отправить отчёт (в группу через send_message).
+    Возвращает (успех, сообщение для пользователя в текущий чат).
+    to_group: если True, в ответе пользователю пишем «отправлен в группу».
     """
     try:
         from report_builder import build_report_text
@@ -75,7 +87,7 @@ def _collect_and_send(chat_id: str) -> tuple[bool, str]:
         if not text:
             text = "📊 Данные не получены. Проверьте логи и настройки Adapty."
         if send_message(text):
-            return True, "✅ Отчёт собран и отправлен."
+            return True, "✅ Отчёт отправлен в группу." if to_group else "✅ Отчёт собран и отправлен."
         return False, "❌ Не удалось отправить отчёт."
     except Exception as e:
         logger.exception("Collect and send failed: %s", e)
@@ -132,17 +144,25 @@ def _handle_message(chat_id: str, text: str) -> bool:
     # Приветствие и подсказка
     if text_lower in ("/start", "/help"):
         current_time = get_report_time()
-        welcome = (
-            "👋 *Adapty Daily Report Bot*\n\n"
-            "• Ежедневный отчёт приходит по расписанию (*{}*).\n"
-            "• Нажми *Собрать данные* — чтобы получить отчёт прямо сейчас.\n"
-            "• Нажми *Установить время сбора* — чтобы изменить время."
-        ).format(current_time)
+        if _is_admin_only_mode():
+            welcome = (
+                "👋 *Adapty Daily Report Bot* (управление из лички)\n\n"
+                "• Ежедневный отчёт уходит в группу по расписанию (*{}*).\n"
+                "• *Собрать данные* — отправить отчёт в группу сейчас.\n"
+                "• *Установить время сбора* — изменить время."
+            ).format(current_time)
+        else:
+            welcome = (
+                "👋 *Adapty Daily Report Bot*\n\n"
+                "• Ежедневный отчёт приходит по расписанию (*{}*).\n"
+                "• Нажми *Собрать данные* — чтобы получить отчёт прямо сейчас.\n"
+                "• Нажми *Установить время сбора* — чтобы изменить время."
+            ).format(current_time)
         return _send(chat_id, welcome, _inline_keyboard())
     # Ручной сбор по команде или по тексту кнопки
     if text_lower in COLLECT_TRIGGERS or "collect" in text_lower and "data" in text_lower:
         _send(chat_id, "⏳ Собираю данные с Adapty…")
-        ok, msg = _collect_and_send(chat_id)
+        ok, msg = _collect_and_send(chat_id, to_group=_is_admin_only_mode())
         _send(chat_id, msg)
         return True
     return False
@@ -152,7 +172,7 @@ def _handle_callback(chat_id: str, callback_query_id: str, data: str) -> bool:
     """Обработка нажатия inline-кнопки. Возвращает True если обработано."""
     if data == "collect":
         _answer_callback(callback_query_id, "Собираю данные…")
-        ok, msg = _collect_and_send(chat_id)
+        ok, msg = _collect_and_send(chat_id, to_group=_is_admin_only_mode())
         _answer_callback(callback_query_id, "Готово!" if ok else None)
         _send(chat_id, msg)
         return True
@@ -170,20 +190,31 @@ def _handle_callback(chat_id: str, callback_query_id: str, data: str) -> bool:
     return False
 
 
-def _process_update(allowed_chat_id: str, update: dict) -> None:
+def _accept_chat(chat_id: str, chat_type: str, group_chat_id: str, admin_id: str | None) -> bool:
+    """Решить, обрабатывать ли сообщение/колбек из этого чата."""
+    if admin_id:
+        # Режим «управление из лички»: принимаем только личку от админа
+        return chat_type == "private" and chat_id == admin_id
+    # Классический режим: только группа
+    return chat_id == group_chat_id
+
+
+def _process_update(group_chat_id: str, admin_id: str | None, update: dict) -> None:
     """Разобрать один update и вызвать нужный обработчик."""
     if "message" in update:
         msg = update["message"]
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        if chat_id != allowed_chat_id:
+        chat = msg.get("chat", {})
+        chat_id = str(chat.get("id", ""))
+        if not _accept_chat(chat_id, chat.get("type", ""), group_chat_id, admin_id):
             return
         text = (msg.get("text") or "").strip()
         _handle_message(chat_id, text)
         return
     if "callback_query" in update:
         cq = update["callback_query"]
-        chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
-        if chat_id != allowed_chat_id:
+        chat = cq.get("message", {}).get("chat", {})
+        chat_id = str(chat.get("id", ""))
+        if not _accept_chat(chat_id, chat.get("type", ""), group_chat_id, admin_id):
             return
         _handle_callback(chat_id, cq["id"], (cq.get("data") or "").strip())
         return
@@ -192,7 +223,8 @@ def _process_update(allowed_chat_id: str, update: dict) -> None:
 def _poll_loop() -> None:
     """Бесконечный цикл long polling getUpdates."""
     token = get_telegram_token()
-    allowed_chat_id = get_telegram_chat_id().strip()
+    group_chat_id = get_telegram_chat_id().strip()
+    admin_id = get_telegram_admin_id()
     url = f"{TELEGRAM_API}{token}/getUpdates"
     offset = 0
     while True:
@@ -209,7 +241,7 @@ def _poll_loop() -> None:
                 continue
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
-                _process_update(allowed_chat_id, upd)
+                _process_update(group_chat_id, admin_id, upd)
         except requests.RequestException as e:
             logger.warning("getUpdates failed: %s", e)
             time.sleep(5)

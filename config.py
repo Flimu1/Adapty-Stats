@@ -47,6 +47,32 @@ def get_telegram_chat_id() -> str:
     return chat_id
 
 
+def get_telegram_admin_id() -> Optional[str]:
+    """
+    Telegram user ID того, кто может управлять ботом из лички.
+    Если задан — команды (/start, Собрать данные, время) принимаются только из личного чата с этим пользователем;
+    отчёты по-прежнему уходят в группу (TELEGRAM_CHAT_ID), в группе никто не видит ваших команд.
+    Как получить: напишите боту в личку, затем откройте getUpdates — в message.from.id будет ваш user id.
+    """
+    raw = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+    return raw if raw else None
+
+
+def get_telegram_topic_id() -> Optional[int]:
+    """
+    ID топика (темы) в группе с включёнными топиками.
+    Если задан — отчёт отправляется в этот топик (message_thread_id).
+    Как получить: отправьте в нужный топик любое сообщение и посмотрите getUpdates — в сообщении будет message_thread_id.
+    """
+    raw = os.getenv("TELEGRAM_TOPIC_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def get_adapty_apps() -> list[AppConfig]:
     apps = _get_apps_from_env()
     if not apps:

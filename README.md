@@ -57,6 +57,10 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
 
 Ответы бота приходят только в чат с `TELEGRAM_CHAT_ID` (другие пользователи не могут запускать сбор).
 
+### Управление из лички (без команд в группе)
+
+Если задать в `.env` переменную **`TELEGRAM_ADMIN_ID`** (ваш Telegram user ID), бот будет принимать команды **только в личном чате** с вами. Отчёты по-прежнему уходят в группу (и в топик, если задан `TELEGRAM_TOPIC_ID`), но в группе никто не видит ваших команд и кнопок. Как получить свой user ID: напишите боту в личку, затем откройте `https://api.telegram.org/bot<TOKEN>/getUpdates` — в `message.from.id` будет ваш id.
+
 ## Деплой на Railway
 
 1. Создайте проект на [Railway](https://railway.app) и подключите этот репозиторий (GitHub).
