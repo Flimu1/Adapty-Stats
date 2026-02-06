@@ -1,0 +1,6 @@
+# Adapty Daily Report Bot — зависимости
+# Python 3.11+ рекомендуется
+
+requests>=2.31.0
+python-dotenv>=1.0.0
+apscheduler>=3.10.0
