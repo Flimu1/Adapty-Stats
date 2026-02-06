@@ -27,6 +27,8 @@ def _send_daily_job() -> None:
 
 def run_scheduler() -> None:
     """Запускает блокирующий планировщик с одной задачей в 09:00 по местному времени."""
+    from telegram_bot import start_bot_thread
+    start_bot_thread()
     tz = get_timezone()
     hour, minute = get_report_hour_minute()
     scheduler = BlockingScheduler(timezone=tz)

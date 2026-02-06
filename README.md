@@ -48,6 +48,15 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
    python main.py
    ```
 
+## Ручной сбор данных (кнопка в боте)
+
+Пока работает планировщик, бот слушает чат. В том же чате, куда приходит ежедневный отчёт:
+
+- **Команды:** `/start` — приветствие и кнопка; `/collect` или `/data` — сразу собрать актуальные данные с Adapty и отправить отчёт.
+- **Кнопка:** при `/start` появляется inline-кнопка **📊 Collect Data**. Нажатие запускает сбор данных с Adapty и отправку отчёта в чат.
+
+Ответы бота приходят только в чат с `TELEGRAM_CHAT_ID` (другие пользователи не могут запускать сбор).
+
 ## Деплой на Railway
 
 1. Создайте проект на [Railway](https://railway.app) и подключите этот репозиторий (GitHub).
@@ -57,7 +66,7 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
    - `TELEGRAM_CHAT_ID`
    - `ADAPTY_API_KEY_APP1`, `ADAPTY_APP_NAME_1`
    - `ADAPTY_API_KEY_APP2`, `ADAPTY_APP_NAME_2`
-   - При необходимости: `TZ`, `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_EXPORT_PATH`
+   - При необходимости: `TZ`, `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
 
 3. **Procfile** уже настроен: `worker: python main.py`. Railway запустит процесс как worker (без HTTP). Отчёт будет уходить раз в сутки в заданное время.
 
@@ -81,8 +90,10 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
 
 ## Adapty API
 
-Если реальный эндпоинт или формат ответа отличаются от заложенных в коде, задайте в env:
-- `ADAPTY_API_BASE_URL` — базовый URL API
-- `ADAPTY_EXPORT_PATH` — путь к Export Analytics (по умолчанию `v1/export/analytics`)
+Используется официальный [Export Analytics API](https://adapty.io/docs/export-analytics-api):
+- **Retrieve analytics data** — MRR и Installs
+- URL: `https://api-admin.adapty.io/api/v1/client-api/metrics/analytics/`
 
-Структуру ответа можно адаптировать в `adapty_client.py` в функции `_parse_analytics_response`.
+При необходимости переопределите в env:
+- `ADAPTY_API_BASE_URL` — по умолчанию `https://api-admin.adapty.io`
+- `ADAPTY_ANALYTICS_PATH` — по умолчанию `api/v1/client-api/metrics/analytics/`

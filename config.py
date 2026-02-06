@@ -56,12 +56,17 @@ def get_adapty_apps() -> list[AppConfig]:
 
 
 def get_adapty_base_url() -> str:
-    return os.getenv("ADAPTY_API_BASE_URL", "https://api.adapty.io").rstrip("/")
+    """Базовый URL Adapty Export Analytics API (api-admin.adapty.io)."""
+    return os.getenv(
+        "ADAPTY_API_BASE_URL", "https://api-admin.adapty.io"
+    ).rstrip("/")
 
 
-def get_adapty_export_path() -> str:
-    """Путь к эндпоинту Export Analytics (без ведущего слэша)."""
-    return os.getenv("ADAPTY_EXPORT_PATH", "/v1/export/analytics").strip().lstrip("/")
+def get_adapty_analytics_path() -> str:
+    """Путь к эндпоинту Retrieve analytics data."""
+    return os.getenv(
+        "ADAPTY_ANALYTICS_PATH", "api/v1/client-api/metrics/analytics/"
+    ).strip().lstrip("/")
 
 
 def get_timezone() -> str:
