@@ -3,12 +3,14 @@
 """
 import argparse
 import logging
+import os
 import sys
 
 from config import get_adapty_apps, get_telegram_chat_id, get_telegram_token
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
@@ -28,7 +30,17 @@ def main() -> None:
         action="store_true",
         help="Проверить конфиг и вывести OK (для health check endpoint)",
     )
+    parser.add_argument(
+        "--debug-adapty",
+        action="store_true",
+        help="Один запрос к Adapty (MRR для первого приложения), вывести сырой ответ и выйти",
+    )
     args = parser.parse_args()
+
+    if args.debug_adapty:
+        from adapty_client import _debug_adapty_response
+        _debug_adapty_response()
+        return
 
     if args.health:
         try:

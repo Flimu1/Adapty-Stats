@@ -73,9 +73,49 @@ def get_timezone() -> str:
     return os.getenv("TZ", "Europe/Minsk")
 
 
+# Файл для хранения времени сбора (переопределяет REPORT_TIME из env)
+_REPORT_TIME_FILE = os.path.join(os.path.dirname(__file__), "data", "report_time.txt")
+
+
+def _read_report_time_from_file() -> str | None:
+    """Читает время из файла, если файл есть и не пустой."""
+    try:
+        if os.path.isfile(_REPORT_TIME_FILE):
+            with open(_REPORT_TIME_FILE, "r", encoding="utf-8") as f:
+                s = f.read().strip()
+            if s and re.match(r"^\d{1,2}:\d{2}$", s):
+                return s
+    except OSError:
+        pass
+    return None
+
+
 def get_report_time() -> str:
     """Время отправки отчёта (часы:минуты), например '09:00'."""
+    from_file = _read_report_time_from_file()
+    if from_file is not None:
+        return from_file
     return os.getenv("REPORT_TIME", "09:00")
+
+
+def set_report_time(time_str: str) -> tuple[bool, str]:
+    """
+    Сохраняет время в файл. time_str в формате ЧЧ:ММ (например 09:30).
+    Возвращает (успех, сообщение_об_ошибке).
+    """
+    time_str = time_str.strip()
+    if not re.match(r"^(\d{1,2}):(\d{2})$", time_str):
+        return False, "Неверный формат. Используйте ЧЧ:ММ (например, 09:00)."
+    h, m = int(time_str.split(":")[0]), int(time_str.split(":")[1])
+    if h < 0 or h > 23 or m < 0 or m > 59:
+        return False, "Час должен быть 0–23, минуты 0–59."
+    try:
+        os.makedirs(os.path.dirname(_REPORT_TIME_FILE), exist_ok=True)
+        with open(_REPORT_TIME_FILE, "w", encoding="utf-8") as f:
+            f.write(time_str)
+        return True, ""
+    except OSError as e:
+        return False, f"Не удалось сохранить: {e}"
 
 
 def get_report_hour_minute() -> tuple[int, int]:

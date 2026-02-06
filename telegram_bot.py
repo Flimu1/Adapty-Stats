@@ -4,14 +4,18 @@ Telegram-бот: приём команд и кнопка «Собрать дан
 """
 import json
 import logging
+import re
 import threading
 import time
 
 import requests
 
-from config import get_telegram_chat_id, get_telegram_token
+from config import get_report_time, get_telegram_chat_id, get_telegram_token, set_report_time
 
 logger = logging.getLogger(__name__)
+
+# Состояние ожидания ввода времени (chat_id -> "set_time")
+_pending_state: dict[str, str] = {}
 
 TELEGRAM_API = "https://api.telegram.org/bot"
 
@@ -78,13 +82,37 @@ def _collect_and_send(chat_id: str) -> tuple[bool, str]:
         return False, f"❌ Ошибка: {e!s}"
 
 
-def _inline_keyboard_collect() -> dict:
-    """Inline-клавиатура с одной кнопкой «Собрать данные»."""
+def _inline_keyboard() -> dict:
+    """Inline-клавиатура: «Собрать данные» и «Установить время сбора»."""
     return {
-        "inline_keyboard": [[
-            {"text": "📊 Collect Data", "callback_data": "collect"}
-        ]]
+        "inline_keyboard": [
+            [{"text": "📊 Собрать данные", "callback_data": "collect"}],
+            [{"text": "⏰ Установить время сбора", "callback_data": "settime"}],
+        ]
     }
+
+
+def _handle_set_time_input(chat_id: str, text: str) -> bool:
+    """Обработка ввода времени (формат ЧЧ:ММ). Возвращает True если обработано."""
+    if _pending_state.pop(chat_id, None) != "set_time":
+        return False
+    ok, err = set_report_time(text)
+    if not ok:
+        _pending_state[chat_id] = "set_time"
+        _send(chat_id, f"❌ {err}\n\nПопробуйте снова в формате ЧЧ:ММ (например, 09:00):")
+        return True
+    # Успешно сохранили — переназначаем задачу в планировщике
+    m = re.match(r"^(\d{1,2}):(\d{2})$", text.strip())
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        from scheduler import reschedule_daily_report
+        if reschedule_daily_report(hour, minute):
+            _send(chat_id, f"✅ Время сбора установлено на *{text}*. Отчёт будет отправляться ежедневно в это время.", _inline_keyboard())
+        else:
+            _send(chat_id, f"✅ Время сохранено ({text}), но не удалось обновить планировщик. Перезапустите приложение.", _inline_keyboard())
+    else:
+        _send(chat_id, f"✅ Время сохранено: {text}", _inline_keyboard())
+    return True
 
 
 def _handle_message(chat_id: str, text: str) -> bool:
@@ -92,14 +120,25 @@ def _handle_message(chat_id: str, text: str) -> bool:
     if not text:
         return False
     text_lower = text.strip().lower()
+    # Отмена ожидания ввода времени
+    if text_lower in ("/cancel", "отмена", "cancel"):
+        if chat_id in _pending_state:
+            _pending_state.pop(chat_id, None)
+            _send(chat_id, "Отменено.", _inline_keyboard())
+            return True
+    # Ожидание ввода времени
+    if _handle_set_time_input(chat_id, text):
+        return True
     # Приветствие и подсказка
     if text_lower in ("/start", "/help"):
+        current_time = get_report_time()
         welcome = (
             "👋 *Adapty Daily Report Bot*\n\n"
-            "• Ежедневный отчёт приходит по расписанию.\n"
-            "• Нажми кнопку ниже или отправь /collect — чтобы *собрать данные прямо сейчас* с Adapty и получить актуальный отчёт."
-        )
-        return _send(chat_id, welcome, _inline_keyboard_collect())
+            "• Ежедневный отчёт приходит по расписанию (*{}*).\n"
+            "• Нажми *Собрать данные* — чтобы получить отчёт прямо сейчас.\n"
+            "• Нажми *Установить время сбора* — чтобы изменить время."
+        ).format(current_time)
+        return _send(chat_id, welcome, _inline_keyboard())
     # Ручной сбор по команде или по тексту кнопки
     if text_lower in COLLECT_TRIGGERS or "collect" in text_lower and "data" in text_lower:
         _send(chat_id, "⏳ Собираю данные с Adapty…")
@@ -111,13 +150,24 @@ def _handle_message(chat_id: str, text: str) -> bool:
 
 def _handle_callback(chat_id: str, callback_query_id: str, data: str) -> bool:
     """Обработка нажатия inline-кнопки. Возвращает True если обработано."""
-    if data != "collect":
-        return False
-    _answer_callback(callback_query_id, "Собираю данные…")
-    ok, msg = _collect_and_send(chat_id)
-    _answer_callback(callback_query_id, "Готово!" if ok else None)
-    _send(chat_id, msg)
-    return True
+    if data == "collect":
+        _answer_callback(callback_query_id, "Собираю данные…")
+        ok, msg = _collect_and_send(chat_id)
+        _answer_callback(callback_query_id, "Готово!" if ok else None)
+        _send(chat_id, msg)
+        return True
+    if data == "settime":
+        _pending_state[chat_id] = "set_time"
+        _answer_callback(callback_query_id, "Введите время…")
+        current = get_report_time()
+        _send(
+            chat_id,
+            f"⏰ Текущее время сбора: *{current}*\n\n"
+            "Введите новое время в формате *ЧЧ:ММ* (например, 09:00 или 14:30).\n"
+            "Для отмены отправьте /cancel.",
+        )
+        return True
+    return False
 
 
 def _process_update(allowed_chat_id: str, update: dict) -> None:

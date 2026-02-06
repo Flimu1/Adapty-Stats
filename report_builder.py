@@ -2,11 +2,12 @@
 Сбор данных по всем приложениям, расчёт дельт, форматирование текста отчёта для Telegram.
 """
 from datetime import datetime
+from typing import Union
 
 from adapty_client import fetch_all_metrics
 
 
-def _fmt_num(n: float | int) -> str:
+def _fmt_num(n: Union[float, int]) -> str:
     """Форматирование числа с запятыми как разделителями тысяч (1,234)."""
     if isinstance(n, float):
         if n == int(n):

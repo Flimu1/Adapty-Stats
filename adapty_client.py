@@ -49,6 +49,12 @@ def _fetch_chart(
     }
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=30)
+        logger.debug(
+            "Adapty API response: status=%s chart_id=%s body=%s",
+            resp.status_code,
+            chart_id,
+            resp.text[:500] if resp.text else "(empty)",
+        )
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
@@ -58,19 +64,122 @@ def _fetch_chart(
         logger.exception("Adapty API invalid JSON (chart_id=%s): %s", chart_id, e)
         return 0.0 if chart_id == "mrr" else 0
 
-    # Ответ: { "data": { "mrr": { "value": 123.45, ... }, ... } }
-    # или { "data": { "installs": { "value": 100, ... }, ... } }
+    # Парсим значение метрики. Реальный ответ Adapty:
+    # - MRR: data.gross_revenue.value или data.proceeds.value (не data.mrr!)
+    # - Installs: data.<ключ>.value (уточняется по ответу)
+    # Также возможны: data[chart_id].value, data[chart_id].data[0].value, rows/series.
     data_obj = data.get("data") or {}
-    metric = data_obj.get(chart_id)
-    if metric is None:
+    if not isinstance(data_obj, dict):
         return 0.0 if chart_id == "mrr" else 0
-    val = metric.get("value")
-    if val is None:
-        return 0.0 if chart_id == "mrr" else 0
-    try:
-        return float(val) if chart_id == "mrr" else int(val)
-    except (TypeError, ValueError):
-        return 0.0 if chart_id == "mrr" else 0
+
+    # Для MRR API возвращает gross_revenue и proceeds — берём gross_revenue (валовая выручка)
+    if chart_id == "mrr":
+        for key in ("gross_revenue", "proceeds", "mrr"):
+            metric = data_obj.get(key)
+            if metric is not None and isinstance(metric, dict):
+                val = metric.get("value")
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        pass
+                # вложенный data[0].value
+                arr = metric.get("data")
+                if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+                    val = arr[0].get("value")
+                    if val is not None:
+                        try:
+                            return float(val)
+                        except (TypeError, ValueError):
+                            pass
+        logger.warning("Adapty API: MRR не найден в ответе, keys=%s", list(data_obj.keys()))
+        return 0.0
+
+    # Installs: API возвращает data.common.value (не data.installs!)
+    for key in ("common", chart_id, "installs", "new_installs"):
+        metric = data_obj.get(key)
+        if metric is not None and isinstance(metric, dict):
+            val = metric.get("value")
+            if val is not None:
+                try:
+                    return int(float(val))
+                except (TypeError, ValueError):
+                    pass
+            arr = metric.get("data")
+            if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+                val = arr[0].get("value")
+                if val is not None:
+                    try:
+                        return int(float(val))
+                    except (TypeError, ValueError):
+                        pass
+
+    logger.warning(
+        "Adapty API: метрика не найдена для chart_id=%s, data keys=%s",
+        chart_id,
+        list(data_obj.keys()),
+    )
+    return 0
+
+
+def _debug_adapty_response() -> None:
+    """
+    Выполняет один запрос к Adapty (MRR для первого приложения) и выводит сырой ответ.
+    Запуск: python main.py --debug-adapty (или LOG_LEVEL=DEBUG python main.py --test-send).
+    """
+    apps = get_adapty_apps()
+    base_url = get_adapty_base_url()
+    path = get_adapty_analytics_path()
+    tz = get_timezone()
+    app = apps[0]
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    to_today = datetime.utcnow()
+    from_today = to_today - timedelta(hours=24)
+    body = {
+        "chart_id": "mrr",
+        "filters": {
+            "date": [from_today.strftime("%Y-%m-%d"), to_today.strftime("%Y-%m-%d")],
+        },
+        "period_unit": "day",
+        "format": "json",
+    }
+    headers = {
+        "Authorization": f"Api-Key {app.api_key}",
+        "Content-Type": "application/json",
+        "Adapty-Tz": tz,
+    }
+    for chart_id in ("mrr", "installs"):
+        body_chart = {**body, "chart_id": chart_id}
+        print(f"=== Adapty debug: chart_id={chart_id} ===")
+        print("URL:", url)
+        print("Body:", body_chart)
+        try:
+            resp = requests.post(url, json=body_chart, headers=headers, timeout=30)
+            print("Status:", resp.status_code)
+            # Показываем только ключи верхнего уровня и data.*
+            if resp.ok and resp.text:
+                try:
+                    j = resp.json()
+                    d = j.get("data") or {}
+                    keys = list(d.keys()) if isinstance(d, dict) else []
+                    print("data keys:", keys)
+                    for k in keys[:3]:  # первые 3 ключа и их value
+                        v = d.get(k)
+                        if isinstance(v, dict):
+                            print(f"  {k}.value =", v.get("value"))
+                        else:
+                            print(f"  {k} =", type(v).__name__)
+                    if len(resp.text) < 1500:
+                        print("Response:", resp.text[:1500])
+                    else:
+                        print("Response (first 800 chars):", resp.text[:800], "...")
+                except Exception:
+                    print("Response (raw):", resp.text[:1500])
+            else:
+                print("Response:", resp.text[:500] if resp.text else "(empty)")
+        except Exception as e:
+            print("Request failed:", e)
+        print()
 
 
 def fetch_metrics_for_app(

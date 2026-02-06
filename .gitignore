@@ -25,3 +25,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Runtime settings (report time override)
+data/
