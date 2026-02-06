@@ -6,7 +6,8 @@ API: POST /api/v1/client-api/metrics/analytics/ (api-admin.adapty.io)
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Any, Union
+from typing import Any, Tuple, Union
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -32,6 +33,7 @@ def _fetch_chart(
     """
     Один запрос к Adapty за одну метрику (mrr или installs).
     Возвращает значение value из ответа.
+    Для периодов > 365 дней API требует period_unit=month (daily нельзя).
     """
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     headers = {
@@ -39,12 +41,14 @@ def _fetch_chart(
         "Content-Type": "application/json",
         "Adapty-Tz": timezone,
     }
+    days = (date_to - date_from).days
+    period_unit = "month" if days > 365 else "day"
     body = {
         "chart_id": chart_id,
         "filters": {
             "date": [date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")],
         },
-        "period_unit": "day",
+        "period_unit": period_unit,
         "format": "json",
     }
     try:
@@ -199,46 +203,122 @@ def fetch_metrics_for_app(
     return {"mrr": float(mrr), "installs": int(installs)}
 
 
-# Начальная дата "всего времени" для запросов all-time и снимков на конец периода
-_EPOCH_DATE = datetime(2020, 1, 1)
+def _fetch_mrr_last_two_days(
+    api_key: str,
+    base_url: str,
+    path: str,
+    timezone: str,
+    date_yesterday: datetime,
+    date_today: datetime,
+) -> Tuple[float, float]:
+    """
+    Запрашивает MRR за (вчера, сегодня) в календарных днях (в timezone отчёта).
+    Возвращает (mrr_yesterday, mrr_today) по последним двум точкам data[0].values.
+    Так дельта совпадает с дашбордом Adapty (5 фев = 307.07, 6 фев = 348.2).
+    """
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json",
+        "Adapty-Tz": timezone,
+    }
+    body = {
+        "chart_id": "mrr",
+        "filters": {
+            "date": [date_yesterday.strftime("%Y-%m-%d"), date_today.strftime("%Y-%m-%d")],
+        },
+        "period_unit": "day",
+        "format": "json",
+    }
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("MRR two-day request failed: %s", e)
+        return 0.0, 0.0
+
+    data_obj = data.get("data") or {}
+    for key in ("gross_revenue", "proceeds", "mrr"):
+        metric = data_obj.get(key)
+        if not metric or not isinstance(metric, dict):
+            continue
+        arr = metric.get("data")
+        if not isinstance(arr, list) or not arr:
+            continue
+        first = arr[0]
+        if not isinstance(first, dict):
+            continue
+        values = first.get("values")
+        if not isinstance(values, list) or len(values) < 1:
+            continue
+        try:
+            y_today = float(values[-1].get("y", 0))
+            y_yesterday = float(values[-2].get("y", 0)) if len(values) >= 2 else 0.0
+            return y_yesterday, y_today
+        except (TypeError, ValueError):
+            continue
+    return 0.0, 0.0
 
 
 def fetch_all_metrics() -> list[dict[str, Any]]:
     """
     Собирает метрики по всем приложениям параллельно.
-    - MRR: снимок на сейчас и на 24ч назад; total = текущий MRR, delta = прирост за сутки.
-    - Installs: всего за всё время на приложении; total = all-time, delta = прирост за последние 24ч.
+    - MRR и Installs: за текущий месяц (основная цифра), в скобках — прирост за сутки.
+    - Дельта MRR: по календарным дням в timezone отчёта (вчера/сегодня), как в дашборде Adapty.
     Возвращает: name, mrr_total, mrr_delta_24h, installs_total, installs_delta_24h.
     """
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
     path = get_adapty_analytics_path()
-    tz = get_timezone()
+    tz_str = get_timezone()
 
-    now = datetime.utcnow()
-    now_24h_ago = now - timedelta(hours=24)
+    # Текущий месяц и «вчера/сегодня» в timezone отчёта (как в Adapty)
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    yesterday = today - timedelta(days=1)
+    start_of_month = today.replace(day=1)
+
+    date_start_month = datetime(start_of_month.year, start_of_month.month, start_of_month.day)
+    date_today = datetime(today.year, today.month, today.day)
+    date_yesterday = datetime(yesterday.year, yesterday.month, yesterday.day)
+
+    now_utc = datetime.utcnow()
+    now_24h_ago = now_utc - timedelta(hours=24)
 
     results: list[dict[str, Any]] = []
 
     def job(app_index: int, app_key: str, app_name: str) -> dict[str, Any]:
-        # Снимки на конец периода: [epoch, now] и [epoch, now-24h]
-        current = fetch_metrics_for_app(
-            app_key, base_url, path, tz, _EPOCH_DATE, now
+        # Метрики за месяц (MRR на конец периода, installs — сумма за месяц)
+        month_data = fetch_metrics_for_app(
+            app_key, base_url, path, tz_str, date_start_month, date_today
         )
-        as_of_24h_ago = fetch_metrics_for_app(
-            app_key, base_url, path, tz, _EPOCH_DATE, now_24h_ago
+        mrr_month = month_data.get("mrr") or 0
+        inst_month = month_data.get("installs") or 0
+
+        # Дельта MRR за сутки: вчера vs сегодня (календарные дни в TZ отчёта)
+        mrr_yesterday, mrr_today = _fetch_mrr_last_two_days(
+            app_key, base_url, path, tz_str, date_yesterday, date_today
         )
-        mrr_total = current.get("mrr") or 0
-        mrr_prev = as_of_24h_ago.get("mrr") or 0
-        inst_total = current.get("installs") or 0
-        inst_24h_ago = as_of_24h_ago.get("installs") or 0
+        mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
+
+        # Прирост установок за сутки: последние 24ч
+        inst_24h = _fetch_chart(
+            app_key, base_url, path, tz_str, "installs", now_24h_ago, now_utc
+        )
+        inst_delta_24h = int(inst_24h) if inst_24h is not None else 0
+
         return {
             "index": app_index,
             "name": app_name,
-            "mrr_total": float(mrr_total),
-            "mrr_delta_24h": float(mrr_total) - float(mrr_prev),
-            "installs_total": int(inst_total),
-            "installs_delta_24h": int(inst_total) - int(inst_24h_ago),
+            "mrr_total": float(mrr_month),
+            "mrr_delta_24h": round(mrr_delta_24h, 2),
+            "installs_total": int(inst_month),
+            "installs_delta_24h": inst_delta_24h,
         }
 
     with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:

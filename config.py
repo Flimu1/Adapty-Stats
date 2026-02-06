@@ -5,6 +5,7 @@
 import os
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -77,7 +78,7 @@ def get_timezone() -> str:
 _REPORT_TIME_FILE = os.path.join(os.path.dirname(__file__), "data", "report_time.txt")
 
 
-def _read_report_time_from_file() -> str | None:
+def _read_report_time_from_file() -> Optional[str]:
     """Читает время из файла, если файл есть и не пустой."""
     try:
         if os.path.isfile(_REPORT_TIME_FILE):
