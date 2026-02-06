@@ -3,8 +3,10 @@
 """
 from datetime import datetime
 from typing import Union
+from zoneinfo import ZoneInfo
 
 from adapty_client import fetch_all_metrics
+from config import get_timezone
 
 
 def _fmt_num(n: Union[float, int]) -> str:
@@ -34,7 +36,11 @@ def build_report_text() -> str:
     📲 Installs: 5,678 (+120)  — установок за месяц и прирост за сутки
     """
     rows = fetch_all_metrics()
-    date_str = datetime.now().strftime("%d.%m.%Y")
+    try:
+        tz = ZoneInfo(get_timezone())
+    except Exception:
+        tz = ZoneInfo("Europe/Minsk")
+    date_str = datetime.now(tz).strftime("%d.%m.%Y")
     lines = [
         f"📊 Отчёт на {date_str}",
         "Данные за текущий месяц, в скобках — прирост за сутки.",
