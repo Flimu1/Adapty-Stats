@@ -67,31 +67,40 @@ def _fetch_chart(
     # Парсим значение метрики. Реальный ответ Adapty:
     # - MRR: data.gross_revenue.value или data.proceeds.value (не data.mrr!)
     # - Installs: data.<ключ>.value (уточняется по ответу)
-    # Также возможны: data[chart_id].value, data[chart_id].data[0].value, rows/series.
+    # При длинном периоде API возвращает data.*.data = [ {date, value}, ... ] — берём последнюю точку (конец периода).
     data_obj = data.get("data") or {}
     if not isinstance(data_obj, dict):
         return 0.0 if chart_id == "mrr" else 0
+
+    def _value_from_metric(metric: dict, as_float: bool) -> Union[float, int, None]:
+        """Берёт value из metric.value или из последней точки metric.data (конец периода)."""
+        val = metric.get("value")
+        if val is not None:
+            try:
+                return float(val) if as_float else int(float(val))
+            except (TypeError, ValueError):
+                pass
+        arr = metric.get("data")
+        if isinstance(arr, list) and arr:
+            # Для периода в несколько дней API возвращает массив по дням — нужна последняя точка
+            last_point = arr[-1] if isinstance(arr[-1], dict) else None
+            if last_point is not None:
+                val = last_point.get("value")
+                if val is not None:
+                    try:
+                        return float(val) if as_float else int(float(val))
+                    except (TypeError, ValueError):
+                        pass
+        return None
 
     # Для MRR API возвращает gross_revenue и proceeds — берём gross_revenue (валовая выручка)
     if chart_id == "mrr":
         for key in ("gross_revenue", "proceeds", "mrr"):
             metric = data_obj.get(key)
             if metric is not None and isinstance(metric, dict):
-                val = metric.get("value")
+                val = _value_from_metric(metric, as_float=True)
                 if val is not None:
-                    try:
-                        return float(val)
-                    except (TypeError, ValueError):
-                        pass
-                # вложенный data[0].value
-                arr = metric.get("data")
-                if isinstance(arr, list) and arr and isinstance(arr[0], dict):
-                    val = arr[0].get("value")
-                    if val is not None:
-                        try:
-                            return float(val)
-                        except (TypeError, ValueError):
-                            pass
+                    return float(val)
         logger.warning("Adapty API: MRR не найден в ответе, keys=%s", list(data_obj.keys()))
         return 0.0
 
@@ -99,20 +108,9 @@ def _fetch_chart(
     for key in ("common", chart_id, "installs", "new_installs"):
         metric = data_obj.get(key)
         if metric is not None and isinstance(metric, dict):
-            val = metric.get("value")
+            val = _value_from_metric(metric, as_float=False)
             if val is not None:
-                try:
-                    return int(float(val))
-                except (TypeError, ValueError):
-                    pass
-            arr = metric.get("data")
-            if isinstance(arr, list) and arr and isinstance(arr[0], dict):
-                val = arr[0].get("value")
-                if val is not None:
-                    try:
-                        return int(float(val))
-                    except (TypeError, ValueError):
-                        pass
+                return int(val)
 
     logger.warning(
         "Adapty API: метрика не найдена для chart_id=%s, data keys=%s",
