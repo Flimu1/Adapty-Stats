@@ -46,14 +46,23 @@ def build_report_text() -> str:
         "Данные за текущий месяц, в скобках — прирост за сутки.",
         "",
     ]
+    total_mrr = 0.0
+    total_mrr_delta = 0.0
+    total_inst_delta = 0
     for r in rows:
         name = r.get("name", "App")
         mrr_total = r.get("mrr_total") or 0
         mrr_delta = r.get("mrr_delta_24h") or 0
         inst_total = r.get("installs_total") or 0
         inst_delta = r.get("installs_delta_24h") or 0
+        total_mrr += mrr_total
+        total_mrr_delta += mrr_delta
+        total_inst_delta += inst_delta
         lines.append(f"**{name}**")
         lines.append(f"💰 MRR: ${_fmt_num(mrr_total)} {_fmt_delta(mrr_delta, is_mrr=True)}")
         lines.append(f"📲 Installs: {_fmt_num(inst_total)} {_fmt_delta(inst_delta)}")
         lines.append("")
+    lines.append("**Total**")
+    lines.append(f"💰 Total MRR: ${_fmt_num(total_mrr)} {_fmt_delta(total_mrr_delta, is_mrr=True)}")
+    lines.append(f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}")
     return "\n".join(lines).strip()
