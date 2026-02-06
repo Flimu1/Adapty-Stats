@@ -201,11 +201,15 @@ def fetch_metrics_for_app(
     return {"mrr": float(mrr), "installs": int(installs)}
 
 
+# Начальная дата "всего времени" для запросов all-time и снимков на конец периода
+_EPOCH_DATE = datetime(2020, 1, 1)
+
+
 def fetch_all_metrics() -> list[dict[str, Any]]:
     """
     Собирает метрики по всем приложениям параллельно.
-    Для каждого приложения: MRR и Installs за последние 24ч и за предыдущие 24ч.
-    Total = за последние 24ч, Delta = разница с предыдущими 24ч.
+    - MRR: снимок на сейчас и на 24ч назад; total = текущий MRR, delta = прирост за сутки.
+    - Installs: всего за всё время на приложении; total = all-time, delta = прирост за последние 24ч.
     Возвращает: name, mrr_total, mrr_delta_24h, installs_total, installs_delta_24h.
     """
     apps = get_adapty_apps()
@@ -213,33 +217,30 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
     path = get_adapty_analytics_path()
     tz = get_timezone()
 
-    # Период "сегодня" — последние 24 часа
-    to_today = datetime.utcnow()
-    from_today = to_today - timedelta(hours=24)
-    # Период "вчера" — предыдущие 24 часа (для дельты)
-    to_yesterday = from_today
-    from_yesterday = to_yesterday - timedelta(hours=24)
+    now = datetime.utcnow()
+    now_24h_ago = now - timedelta(hours=24)
 
     results: list[dict[str, Any]] = []
 
     def job(app_index: int, app_key: str, app_name: str) -> dict[str, Any]:
+        # Снимки на конец периода: [epoch, now] и [epoch, now-24h]
         current = fetch_metrics_for_app(
-            app_key, base_url, path, tz, from_today, to_today
+            app_key, base_url, path, tz, _EPOCH_DATE, now
         )
-        previous = fetch_metrics_for_app(
-            app_key, base_url, path, tz, from_yesterday, to_yesterday
+        as_of_24h_ago = fetch_metrics_for_app(
+            app_key, base_url, path, tz, _EPOCH_DATE, now_24h_ago
         )
         mrr_total = current.get("mrr") or 0
-        mrr_prev = previous.get("mrr") or 0
+        mrr_prev = as_of_24h_ago.get("mrr") or 0
         inst_total = current.get("installs") or 0
-        inst_prev = previous.get("installs") or 0
+        inst_24h_ago = as_of_24h_ago.get("installs") or 0
         return {
             "index": app_index,
             "name": app_name,
             "mrr_total": float(mrr_total),
             "mrr_delta_24h": float(mrr_total) - float(mrr_prev),
             "installs_total": int(inst_total),
-            "installs_delta_24h": int(inst_total) - int(inst_prev),
+            "installs_delta_24h": int(inst_total) - int(inst_24h_ago),
         }
 
     with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:

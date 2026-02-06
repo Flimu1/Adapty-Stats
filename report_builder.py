@@ -30,8 +30,8 @@ def build_report_text() -> str:
     Запрашивает метрики у Adapty и формирует текст отчёта в формате:
     📊 Отчёт на ДД.ММ.ГГГГ
     **App Name**
-    💰 MRR: $1,234 (+$56)
-    📲 Installs: 5,678 (+120)
+    💰 MRR: $1,234 (+$56)   — текущий MRR и прирост за сутки
+    📲 Installs: 5,678 (+120)  — всего установок за всё время и прирост за сутки
     """
     rows = fetch_all_metrics()
     date_str = datetime.now().strftime("%d.%m.%Y")
