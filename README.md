@@ -2,6 +2,25 @@
 
 Telegram-бот для ежедневной отчётности по метрикам Adapty (MRR, Installs). Хостинг: Railway.
 
+## Репозиторий на GitHub
+
+Локально уже выполнены `git init`, первый коммит и все файлы готовы к push.
+
+**Если установлен GitHub CLI:**
+```bash
+cd "Adapty stats"
+gh repo create adapty-stats --private --source=. --remote=origin --push
+```
+(Или `--public`, имя репозитория по желанию.)
+
+**Если репозиторий создаёте вручную на GitHub:**
+1. На [github.com/new](https://github.com/new) создайте репозиторий (например `adapty-stats`), без README.
+2. Выполните в каталоге проекта:
+   ```bash
+   git remote add origin https://github.com/<ВАШ_USERNAME>/adapty-stats.git
+   git push -u origin main
+   ```
+
 ## Локальный запуск
 
 1. Клонировать репозиторий и перейти в каталог:
