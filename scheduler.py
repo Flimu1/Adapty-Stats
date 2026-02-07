@@ -1,6 +1,7 @@
 """
 Настройка APScheduler: ежедневная отправка отчёта в 09:00 Europe/Minsk.
 """
+import datetime
 import logging
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -15,6 +16,7 @@ _scheduler: BlockingScheduler | None = None
 
 def _send_daily_job() -> None:
     """Job для планировщика: собрать отчёт и отправить в Telegram."""
+    logger.info("Running scheduled daily report (triggered at %s)", datetime.datetime.now())
     from report_builder import build_report_text
     from telegram_sender import send_message
     try:
@@ -61,5 +63,10 @@ def run_scheduler() -> None:
         trigger=CronTrigger(hour=hour, minute=minute),
         id="daily_report",
     )
-    logger.info("Scheduler started: daily report at %02d:%02d %s", hour, minute, tz)
+    job = _scheduler.get_job("daily_report")
+    next_run = job.next_run_time if job else None
+    logger.info(
+        "Scheduler started: daily report at %02d:%02d %s, next run: %s",
+        hour, minute, tz, next_run,
+    )
     _scheduler.start()
