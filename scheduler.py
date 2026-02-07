@@ -64,7 +64,8 @@ def run_scheduler() -> None:
         id="daily_report",
     )
     job = _scheduler.get_job("daily_report")
-    next_run = job.next_run_time if job else None
+    # APScheduler 4.x: у Job нет атрибута next_run_time (есть в 3.x)
+    next_run = getattr(job, "next_run_time", None) if job else None
     logger.info(
         "Scheduler started: daily report at %02d:%02d %s, next run: %s",
         hour, minute, tz, next_run,
