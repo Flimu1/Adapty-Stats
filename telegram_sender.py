@@ -13,10 +13,19 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot"
 
 
-def send_message(text: str, parse_mode: str = "Markdown") -> bool:
-    """Отправляет сообщение в чат (опционально в указанный топик). Возвращает True при успехе."""
+from typing import Optional
+
+def send_message(text: str, parse_mode: str = "HTML", chat_id: Optional[str] = None) -> bool:
+    """Отправляет сообщение в чат (опционально в указанный топик). Возвращает True при успехе.
+
+    Args:
+        text: Текст сообщения
+        parse_mode: Режим форматирования (HTML, Markdown, None). По умолчанию HTML
+        chat_id: ID чата для отправки (если None, используется TELEGRAM_CHAT_ID из конфига)
+    """
     token = get_telegram_token()
-    chat_id = get_telegram_chat_id()
+    if chat_id is None:
+        chat_id = get_telegram_chat_id()
     url = f"{TELEGRAM_API}{token}/sendMessage"
     payload = {
         "chat_id": chat_id.strip(),

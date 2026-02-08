@@ -10,6 +10,8 @@ from typing import Any, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import (
     get_adapty_apps,
@@ -21,6 +23,27 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
+def _get_session() -> requests.Session:
+    """
+    Возвращает requests.Session с настроенным HTTPAdapter и retry-логикой.
+    Автоматически повторяет запросы при ошибках 500, 502, 503, 504 и проблемах с сетью.
+    """
+    session = requests.Session()
+
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+    )
+
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    return session
+
+
 def _fetch_chart(
     api_key: str,
     base_url: str,
@@ -29,10 +52,10 @@ def _fetch_chart(
     chart_id: str,
     date_from: datetime,
     date_to: datetime,
-) -> Union[float, int]:
+) -> Union[float, int, None]:
     """
     Один запрос к Adapty за одну метрику (mrr или installs).
-    Возвращает значение value из ответа.
+    Возвращает значение value из ответа или None при ошибке.
     Для периодов > 365 дней API требует period_unit=month (daily нельзя).
     """
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -52,7 +75,8 @@ def _fetch_chart(
         "format": "json",
     }
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        session = _get_session()
+        resp = session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
             "Adapty API response: status=%s chart_id=%s body=%s",
             resp.status_code,
@@ -63,10 +87,10 @@ def _fetch_chart(
         data = resp.json()
     except requests.RequestException as e:
         logger.exception("Adapty API request failed (chart_id=%s): %s", chart_id, e)
-        return 0.0 if chart_id == "mrr" else 0
+        return None
     except ValueError as e:
         logger.exception("Adapty API invalid JSON (chart_id=%s): %s", chart_id, e)
-        return 0.0 if chart_id == "mrr" else 0
+        return None
 
     # Парсим значение метрики. Реальный ответ Adapty:
     # - MRR: data.gross_revenue.value или data.proceeds.value (не data.mrr!)
@@ -74,7 +98,7 @@ def _fetch_chart(
     # При длинном периоде API возвращает data.*.data = [ {date, value}, ... ] — берём последнюю точку (конец периода).
     data_obj = data.get("data") or {}
     if not isinstance(data_obj, dict):
-        return 0.0 if chart_id == "mrr" else 0
+        return None
 
     def _value_from_metric(metric: dict, as_float: bool) -> Union[float, int, None]:
         """Берёт value из metric.value или из последней точки metric.data (конец периода)."""
@@ -106,7 +130,7 @@ def _fetch_chart(
                 if val is not None:
                     return float(val)
         logger.warning("Adapty API: MRR не найден в ответе, keys=%s", list(data_obj.keys()))
-        return 0.0
+        return None
 
     # Installs: API возвращает data.common.value (не data.installs!)
     for key in ("common", chart_id, "installs", "new_installs"):
@@ -121,7 +145,7 @@ def _fetch_chart(
         chart_id,
         list(data_obj.keys()),
     )
-    return 0
+    return None
 
 
 def _debug_adapty_response() -> None:
@@ -196,16 +220,17 @@ def fetch_metrics_for_app(
     timezone: str,
     date_from: datetime,
     date_to: datetime,
-) -> dict[str, Union[float, int]]:
+) -> dict[str, Union[float, int, None]]:
     """
     Два запроса к Adapty (mrr + installs) за период [date_from, date_to].
     Возвращает dict с ключами mrr, installs.
+    Значения могут быть None при ошибке запроса.
     """
     mrr = _fetch_chart(api_key, base_url, path, timezone, "mrr", date_from, date_to)
     installs = _fetch_chart(
         api_key, base_url, path, timezone, "installs", date_from, date_to
     )
-    return {"mrr": float(mrr), "installs": int(installs)}
+    return {"mrr": mrr, "installs": installs}
 
 
 def _fetch_mrr_last_two_days(
@@ -215,10 +240,11 @@ def _fetch_mrr_last_two_days(
     timezone: str,
     date_yesterday: datetime,
     date_today: datetime,
-) -> Tuple[float, float]:
+) -> Tuple[Union[float, None], Union[float, None]]:
     """
     Запрашивает MRR за (вчера, сегодня) в календарных днях (в timezone отчёта).
     Возвращает (mrr_yesterday, mrr_today) по последним двум точкам data[0].values.
+    При ошибке возвращает (None, None).
     Так дельта совпадает с дашбордом Adapty (5 фев = 307.07, 6 фев = 348.2).
     """
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -236,12 +262,13 @@ def _fetch_mrr_last_two_days(
         "format": "json",
     }
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        session = _get_session()
+        resp = session.post(url, json=body, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except (requests.RequestException, ValueError) as e:
         logger.warning("MRR two-day request failed: %s", e)
-        return 0.0, 0.0
+        return None, None
 
     data_obj = data.get("data") or {}
     for key in ("gross_revenue", "proceeds", "mrr"):
@@ -263,7 +290,7 @@ def _fetch_mrr_last_two_days(
             return y_yesterday, y_today
         except (TypeError, ValueError):
             continue
-    return 0.0, 0.0
+    return None, None
 
 
 def fetch_all_metrics() -> list[dict[str, Any]]:
@@ -300,27 +327,30 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
         month_data = fetch_metrics_for_app(
             app_key, base_url, path, tz_str, date_start_month, date_today
         )
-        mrr_month = month_data.get("mrr") or 0
-        inst_month = month_data.get("installs") or 0
+        mrr_month = month_data.get("mrr")
+        inst_month = month_data.get("installs")
 
         # Дельта MRR за сутки: вчера vs сегодня (календарные дни в TZ отчёта)
         mrr_yesterday, mrr_today = _fetch_mrr_last_two_days(
             app_key, base_url, path, tz_str, date_yesterday, date_today
         )
-        mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
+        if mrr_today is not None and mrr_yesterday is not None:
+            mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
+        else:
+            mrr_delta_24h = None
 
         # Установки за сегодня: один календарный день (день скрапинга/отчёта)
         inst_today = _fetch_chart(
             app_key, base_url, path, tz_str, "installs", date_today, date_today
         )
-        inst_delta_24h = int(inst_today) if inst_today is not None else 0
+        inst_delta_24h = int(inst_today) if inst_today is not None else None
 
         return {
             "index": app_index,
             "name": app_name,
-            "mrr_total": float(mrr_month),
-            "mrr_delta_24h": round(mrr_delta_24h, 2),
-            "installs_total": int(inst_month),
+            "mrr_total": mrr_month,
+            "mrr_delta_24h": mrr_delta_24h,
+            "installs_total": inst_month,
             "installs_delta_24h": inst_delta_24h,
         }
 
@@ -339,10 +369,10 @@ def fetch_all_metrics() -> list[dict[str, Any]]:
                     {
                         "index": idx,
                         "name": apps[idx].name,
-                        "mrr_total": 0.0,
-                        "mrr_delta_24h": 0.0,
-                        "installs_total": 0,
-                        "installs_delta_24h": 0,
+                        "mrr_total": None,
+                        "mrr_delta_24h": None,
+                        "installs_total": None,
+                        "installs_delta_24h": None,
                     }
                 )
 

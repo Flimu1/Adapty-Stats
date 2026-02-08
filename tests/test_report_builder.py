@@ -33,7 +33,7 @@ class TestReportBuilder(unittest.TestCase):
         from report_builder import build_report_text
 
         text = build_report_text()
-        self.assertIn("**Total**", text)
+        self.assertIn("<b>Total</b>", text)
         self.assertIn("Total MRR", text)
         self.assertIn("Total Downloads", text)
 
@@ -66,8 +66,8 @@ class TestReportBuilder(unittest.TestCase):
         from report_builder import build_report_text
 
         text = build_report_text()
-        self.assertIn("**App One**", text)
-        self.assertIn("**App Two**", text)
+        self.assertIn("<b>App One</b>", text)
+        self.assertIn("<b>App Two</b>", text)
         self.assertIn("💰 MRR:", text)
         self.assertIn("📲 Installs:", text)
 

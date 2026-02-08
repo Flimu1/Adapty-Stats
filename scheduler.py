@@ -9,9 +9,11 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import get_report_hour_minute, get_timezone
 
+from typing import Optional
+
 logger = logging.getLogger(__name__)
 
-_scheduler: BlockingScheduler | None = None
+_scheduler: Optional[BlockingScheduler] = None
 
 
 def _send_daily_job() -> None:
@@ -19,6 +21,8 @@ def _send_daily_job() -> None:
     logger.info("Running scheduled daily report (triggered at %s)", datetime.datetime.now())
     from report_builder import build_report_text
     from telegram_sender import send_message
+    from config import get_telegram_admin_id
+
     try:
         text = build_report_text()
         if send_message(text):
@@ -27,6 +31,14 @@ def _send_daily_job() -> None:
             logger.error("Failed to send daily report")
     except Exception as e:
         logger.exception("Daily report job failed: %s", e)
+        # Отправляем аварийное уведомление администратору
+        admin_id = get_telegram_admin_id()
+        if admin_id:
+            error_message = f"🚨 Ошибка при отправке ежедневного отчета: {e}"
+            try:
+                send_message(error_message, chat_id=admin_id)
+            except Exception as send_err:
+                logger.exception("Failed to send error notification to admin: %s", send_err)
 
 
 def reschedule_daily_report(hour: int, minute: int) -> bool:
