@@ -3,7 +3,6 @@
 """
 import datetime
 import logging
-from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -22,8 +21,11 @@ def _send_daily_job() -> None:
     """Job для планировщика: собрать отчёт и отправить в Telegram."""
     now = datetime.datetime.now()
     tz_str = get_timezone()
+    tz = ZoneInfo(tz_str)
+    now_tz = datetime.datetime.now(tz)
     logger.info("=" * 50)
     logger.info("RUNNING SCHEDULED DAILY REPORT (triggered at %s %s)", now, tz_str)
+    logger.info("Current time in timezone %s: %s", tz_str, now_tz)
     logger.info("=" * 50)
     
     from report_builder import build_report_text
@@ -54,15 +56,17 @@ def reschedule_daily_report(hour: int, minute: int) -> bool:
     Возвращает True при успехе.
     """
     global _scheduler
+    logger.info("reschedule_daily_report called: hour=%d, minute=%d, _scheduler=%s", hour, minute, _scheduler)
     if _scheduler is None:
         logger.error("Cannot reschedule: scheduler is None (not started yet)")
         return False
     try:
         tz_str = get_timezone()
         tz = ZoneInfo(tz_str)
-        # start_date в прошлом для корректного планирования
-        start_date = datetime.datetime.now(tz) - timedelta(days=1)
-        trigger = CronTrigger(hour=hour, minute=minute, timezone=tz, start_date=start_date)
+        now_tz = datetime.datetime.now(tz)
+        # Явно указываем day='*' для ежедневного выполнения
+        trigger = CronTrigger(hour=hour, minute=minute, day='*', timezone=tz)
+        logger.info("Rescheduling job with trigger: hour=%d, minute=%d, timezone=%s", hour, minute, tz_str)
         _scheduler.reschedule_job(
             "daily_report",
             trigger=trigger,
@@ -70,10 +74,10 @@ def reschedule_daily_report(hour: int, minute: int) -> bool:
         # Проверяем что следующий запуск вычислен
         job = _scheduler.get_job("daily_report")
         if job and hasattr(job, 'trigger'):
-            next_run = job.trigger.get_next_fire_time(None, datetime.datetime.now(tz))
+            next_run = job.trigger.get_next_fire_time(None, now_tz)
         else:
             next_run = None
-        logger.info("Daily report rescheduled to %02d:%02d %s, next run: %s", hour, minute, tz_str, next_run)
+        logger.info("Daily report rescheduled to %02d:%02d %s, next run: %s (current time: %s)", hour, minute, tz_str, next_run, now_tz)
         return True
     except Exception as e:
         logger.exception("Failed to reschedule: %s", e)
@@ -88,12 +92,10 @@ def run_scheduler() -> None:
     tz_str = get_timezone()
     tz = ZoneInfo(tz_str)
     hour, minute = get_report_hour_minute()
-    
-    # start_date в прошлом, чтобы CronTrigger точно запланировал ближайший следующий запуск
-    start_date = datetime.datetime.now(tz) - timedelta(days=1)
-    
+
     _scheduler = BlockingScheduler(timezone=tz)
-    trigger = CronTrigger(hour=hour, minute=minute, timezone=tz, start_date=start_date)
+    # Явно указываем day='*' для ежедневного выполнения
+    trigger = CronTrigger(hour=hour, minute=minute, day='*', timezone=tz)
     _scheduler.add_job(
         _send_daily_job,
         trigger=trigger,
@@ -101,19 +103,24 @@ def run_scheduler() -> None:
     )
     
     logger.info(
-        "Scheduler configured: daily report at %02d:%02d %s, start_date=%s",
-        hour, minute, tz_str, start_date,
+        "Scheduler configured: daily report at %02d:%02d %s (trigger: %s)",
+        hour, minute, tz_str, trigger,
     )
     
     _scheduler.start()
     
     # Логируем next_run_time после start(), когда планировщик вычислил его
     job = _scheduler.get_job("daily_report")
-    if job and hasattr(job, 'trigger'):
-        next_run = job.trigger.get_next_fire_time(None, datetime.datetime.now(tz))
+    now_tz = datetime.datetime.now(tz)
+    if job:
+        logger.info("Job details: id=%s, name=%s, trigger=%s", job.id, job.name, job.trigger)
+        if hasattr(job, 'trigger'):
+            next_run = job.trigger.get_next_fire_time(None, now_tz)
+            logger.info(
+                "Scheduler started: next run at %s (current time: %s)",
+                next_run, now_tz
+            )
+        else:
+            logger.warning("Job has no trigger attribute")
     else:
-        next_run = None
-    logger.info(
-        "Scheduler started: next run at %s",
-        next_run,
-    )
+        logger.error("Job 'daily_report' not found after scheduler start!")
