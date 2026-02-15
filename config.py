@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+MINSK_TIMEZONE = "Europe/Minsk"
+
 
 @dataclass
 class AppConfig:
@@ -97,7 +99,19 @@ def get_adapty_analytics_path() -> str:
 
 
 def get_timezone() -> str:
-    return os.getenv("TZ", "Europe/Minsk")
+    """
+    Единая таймзона проекта: Europe/Minsk.
+    Используется планировщиком и общими датами отчёта.
+    """
+    return MINSK_TIMEZONE
+
+
+def get_adapty_timezone() -> str:
+    """
+    Таймзона для запросов к Adapty Analytics (заголовок Adapty-Tz и границы дат).
+    Зафиксирована как Europe/Minsk для совпадения API и внутренних расчётов.
+    """
+    return MINSK_TIMEZONE
 
 
 # Файл для хранения времени сбора (переопределяет REPORT_TIME из env)

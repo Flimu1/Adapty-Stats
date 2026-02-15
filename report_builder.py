@@ -1,12 +1,22 @@
 """
 Сбор данных по всем приложениям, расчёт дельт, форматирование текста отчёта для Telegram.
 """
-from datetime import datetime
-from typing import Optional, Union
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Union
 from zoneinfo import ZoneInfo
 
 from adapty_client import fetch_all_metrics
-from config import get_timezone
+from config import get_adapty_timezone
+
+
+@dataclass
+class ReportBuildResult:
+    """Готовый отчёт + служебные данные для отправки и алертов."""
+
+    text: str
+    report_date: date
+    anomalies: list[str]
 
 
 def _fmt_num(n: Union[float, int, None]) -> str:
@@ -28,7 +38,9 @@ def _fmt_delta(delta: Union[float, None], is_mrr: bool = False) -> str:
         return "(⚠️ N/A)"
     prefix = "+" if delta >= 0 else ""
     if is_mrr:
-        return f"({prefix}${_fmt_num(round(delta, 2))})"
+        rounded = round(float(delta), 2)
+        sign = "+" if rounded >= 0 else "-"
+        return f"({sign}${_fmt_num(abs(rounded))})"
     return f"({prefix}{_fmt_num(int(delta))})"
 
 
@@ -37,25 +49,87 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def build_report_text() -> str:
+def _resolve_report_date(
+    report_date: Union[date, datetime, None],
+    tz: ZoneInfo,
+) -> date:
+    """Дата отчёта: по умолчанию текущий день в timezone данных Adapty."""
+    if report_date is None:
+        return datetime.now(tz).date()
+    if isinstance(report_date, datetime):
+        return report_date.date()
+    return report_date
+
+
+def _detect_anomalies(rows: list[dict]) -> list[str]:
+    """
+    Базовые валидации данных перед отправкой отчёта.
+    Держим только надёжные правила, чтобы не плодить ложные тревоги.
+    """
+    anomalies: list[str] = []
+    for r in rows:
+        name = str(r.get("name", "App"))
+        mrr_total = r.get("mrr_total")
+        mrr_delta = r.get("mrr_delta_24h")
+        inst_total = r.get("installs_total")
+        inst_delta = r.get("installs_delta_24h")
+
+        missing_fields: list[str] = []
+        if mrr_total is None:
+            missing_fields.append("MRR month")
+        if mrr_delta is None:
+            missing_fields.append("MRR delta")
+        if inst_total is None:
+            missing_fields.append("Installs month")
+        if inst_delta is None:
+            missing_fields.append("Installs day")
+        if missing_fields:
+            anomalies.append(f"{name}: отсутствуют поля ({', '.join(missing_fields)}).")
+
+        if mrr_total is not None and mrr_total < 0:
+            anomalies.append(f"{name}: MRR за месяц отрицательный ({mrr_total:.2f}).")
+        if inst_total is not None and inst_total < 0:
+            anomalies.append(f"{name}: Installs за месяц отрицательные ({inst_total}).")
+        if inst_delta is not None and inst_delta < 0:
+            anomalies.append(f"{name}: Installs за сутки отрицательные ({inst_delta}).")
+        if (
+            inst_total is not None
+            and inst_delta is not None
+            and int(inst_delta) > int(inst_total)
+        ):
+            anomalies.append(
+                f"{name}: installs за сутки ({inst_delta}) больше, чем MTD ({inst_total})."
+            )
+    return anomalies
+
+
+def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuildResult:
     """
     Запрашивает метрики у Adapty и формирует текст отчёта в формате:
     📊 Отчёт на ДД.ММ.ГГГГ
     **App Name**
-    💰 MRR: $1,234 (+$56)   — за текущий месяц и прирост за сутки (календарные дни)
-    📲 Installs: 5,678 (+120)  — установок за месяц и прирост за сутки
+    💰 MRR: $1,234 (+$56)   — за текущий месяц до даты отчёта и прирост за сутки
+    📲 Installs: 5,678 (+120)  — установок за месяц до даты отчёта и прирост за сутки
     """
-    rows = fetch_all_metrics()
     try:
-        tz = ZoneInfo(get_timezone())
+        tz = ZoneInfo(get_adapty_timezone())
     except Exception:
-        tz = ZoneInfo("Europe/Minsk")
-    date_str = datetime.now(tz).strftime("%d.%m.%Y")
+        tz = ZoneInfo("UTC")
+    resolved_report_date = _resolve_report_date(report_date, tz)
+    snapshot_time = datetime.now(tz).strftime("%H:%M")
+    snapshot_tz = getattr(tz, "key", "Europe/Minsk")
+    rows = fetch_all_metrics(report_date=resolved_report_date)
+    anomalies = _detect_anomalies(rows)
+    date_str = resolved_report_date.strftime("%d.%m.%Y")
     lines = [
         f"📊 Отчёт на {date_str}",
         "Данные за текущий месяц, в скобках — прирост за сутки.",
+        f"🕒 Срез на {snapshot_time} ({snapshot_tz})",
         "",
     ]
+    if anomalies:
+        lines.append("⚠️ <b>Обнаружены аномалии в данных, проверьте источники</b>")
+        lines.append("")
     total_mrr = 0.0
     total_mrr_delta = 0.0
     total_inst_delta = 0
@@ -84,4 +158,10 @@ def build_report_text() -> str:
         lines.append("⚠️ <i>Некоторые данные недоступны, сумма может быть неполной</i>")
     lines.append(f"💰 Total MRR: ${_fmt_num(total_mrr)} {_fmt_delta(total_mrr_delta, is_mrr=True)}")
     lines.append(f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}")
-    return "\n".join(lines).strip()
+    text = "\n".join(lines).strip()
+    return ReportBuildResult(text=text, report_date=resolved_report_date, anomalies=anomalies)
+
+
+def build_report_text(report_date: Union[date, datetime, None] = None) -> str:
+    """Совместимость со старым API: возвращает только текст отчёта."""
+    return build_report(report_date=report_date).text

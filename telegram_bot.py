@@ -86,13 +86,35 @@ def _collect_and_send(chat_id: str, to_group: bool = False) -> tuple[bool, str]:
     to_group: если True, в ответе пользователю пишем «отправлен в группу».
     """
     try:
-        from report_builder import build_report_text
+        from report_builder import build_report
         from telegram_sender import send_message
-        text = build_report_text()
+        from config import get_telegram_admin_id
+
+        report = build_report()
+        text = report.text
         if not text:
             text = "📊 Данные не получены. Проверьте логи и настройки Adapty."
         if send_message(text):
-            return True, "✅ Отчёт отправлен в группу." if to_group else "✅ Отчёт собран и отправлен."
+            has_anomalies = bool(report.anomalies)
+            sent_to_admin = False
+            if has_anomalies:
+                admin_id = get_telegram_admin_id()
+                if admin_id:
+                    details = "\n".join(f"• {a}" for a in report.anomalies[:20])
+                    alert = (
+                        f"⚠️ Обнаружены аномалии в отчёте за {report.report_date.strftime('%d.%m.%Y')}\n\n"
+                        f"{details}"
+                    )
+                    sent_to_admin = send_message(alert, chat_id=admin_id)
+            if to_group:
+                msg = "✅ Отчёт отправлен в группу."
+            else:
+                msg = "✅ Отчёт собран и отправлен."
+            if has_anomalies:
+                msg += " ⚠️ Есть аномалии в данных."
+                if sent_to_admin:
+                    msg += " Подробности отправлены администратору."
+            return True, msg
         return False, "❌ Не удалось отправить отчёт."
     except Exception as e:
         logger.exception("Collect and send failed: %s", e)

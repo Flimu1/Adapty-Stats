@@ -2,7 +2,7 @@
 """
 Скрипт для проверки ответов Adapty API. Не зависит от config.py.
 Запуск из корня проекта: python3 scripts/test_adapty_api.py
-Требует: .env с ADAPTY_API_KEY_APP1, опционально ADAPTY_BASE_URL, TZ.
+Требует: .env с ADAPTY_API_KEY_APP1, опционально ADAPTY_BASE_URL.
 """
 import json
 import os
@@ -23,7 +23,7 @@ def main():
     api_key = os.getenv("ADAPTY_API_KEY_APP1", "").strip()
     base_url = (os.getenv("ADAPTY_BASE_URL") or os.getenv("ADAPTY_API_BASE_URL") or "https://api-admin.adapty.io").rstrip("/")
     path = (os.getenv("ADAPTY_ANALYTICS_PATH") or "api/v1/client-api/metrics/analytics/").strip().lstrip("/")
-    tz = os.getenv("TZ", "Europe/Minsk")
+    tz = "Europe/Minsk"
 
     if not api_key:
         print("ERROR: ADAPTY_API_KEY_APP1 not set in .env")

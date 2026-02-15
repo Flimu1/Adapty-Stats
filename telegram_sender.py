@@ -26,15 +26,17 @@ def send_message(text: str, parse_mode: str = "HTML", chat_id: Optional[str] = N
     token = get_telegram_token()
     if chat_id is None:
         chat_id = get_telegram_chat_id()
+    chat_id = chat_id.strip()
     url = f"{TELEGRAM_API}{token}/sendMessage"
     payload = {
-        "chat_id": chat_id.strip(),
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
     topic_id = get_telegram_topic_id()
-    if topic_id is not None:
+    # Топик имеет смысл только для целевого группового чата.
+    if topic_id is not None and chat_id == get_telegram_chat_id().strip():
         payload["message_thread_id"] = topic_id
     try:
         r = requests.post(url, json=payload, timeout=15)

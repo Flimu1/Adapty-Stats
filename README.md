@@ -70,7 +70,7 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
    - `TELEGRAM_CHAT_ID`
    - `ADAPTY_API_KEY_APP1`, `ADAPTY_APP_NAME_1`
    - `ADAPTY_API_KEY_APP2`, `ADAPTY_APP_NAME_2`
-   - При необходимости: `TZ`, `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
+  - При необходимости: `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
 
 3. **Procfile** уже настроен: `worker: python main.py`. Railway запустит процесс как worker (без HTTP). Отчёт будет уходить раз в сутки в заданное время.
 
@@ -101,3 +101,5 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
 При необходимости переопределите в env:
 - `ADAPTY_API_BASE_URL` — по умолчанию `https://api-admin.adapty.io`
 - `ADAPTY_ANALYTICS_PATH` — по умолчанию `api/v1/client-api/metrics/analytics/`
+
+Таймзона в проекте зафиксирована как `Europe/Minsk` для планировщика и запросов к Adapty (`Adapty-Tz`).

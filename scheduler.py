@@ -28,14 +28,28 @@ def _send_daily_job() -> None:
     logger.info("Current time in timezone %s: %s", tz_str, now_tz)
     logger.info("=" * 50)
     
-    from report_builder import build_report_text
+    from report_builder import build_report
     from telegram_sender import send_message
     from config import get_telegram_admin_id
 
     try:
-        text = build_report_text()
-        if send_message(text):
+        report = build_report()
+        if send_message(report.text):
             logger.info("Daily report sent successfully")
+            if report.anomalies:
+                logger.warning(
+                    "Anomalies detected for report date %s: %s",
+                    report.report_date,
+                    report.anomalies,
+                )
+                admin_id = get_telegram_admin_id()
+                if admin_id:
+                    details = "\n".join(f"• {a}" for a in report.anomalies[:20])
+                    alert = (
+                        f"⚠️ Обнаружены аномалии в отчёте за {report.report_date.strftime('%d.%m.%Y')}\n\n"
+                        f"{details}"
+                    )
+                    send_message(alert, chat_id=admin_id)
         else:
             logger.error("Failed to send daily report")
     except Exception as e:
