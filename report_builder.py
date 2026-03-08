@@ -123,8 +123,9 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
     date_str = resolved_report_date.strftime("%d.%m.%Y")
     lines = [
         f"📊 Отчёт на {date_str}",
-        "Данные за текущий месяц, в скобках — прирост за сутки.",
         f"🕒 Срез на {snapshot_time} ({snapshot_tz})",
+        "",
+        "<i>MRR, ARR — на дату. Revenue, Installs, Conv — за месяц. В скобках: Revenue — за сутки, MRR/ARR/Installs — дельта за сутки.</i>",
         "",
     ]
     if anomalies:
@@ -133,6 +134,12 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
     total_mrr = 0.0
     total_mrr_delta = 0.0
     total_inst_delta = 0
+    total_revenue = 0.0
+    total_revenue_per_day = 0.0
+    total_arr = 0.0
+    total_arr_delta = 0.0
+    conv_weighted_sum = 0.0
+    conv_weighted_installs = 0
     has_missing_data = False
     for r in rows:
         name = r.get("name", "App")
@@ -140,24 +147,59 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
         mrr_delta = r.get("mrr_delta_24h")
         inst_total = r.get("installs_total")
         inst_delta = r.get("installs_delta_24h")
+        revenue_total = r.get("revenue_total")
+        revenue_per_day = r.get("revenue_per_day")
+        arr_total = r.get("arr_total")
+        arr_delta = r.get("arr_delta_24h")
+        conv_rate = r.get("conv_rate")
         # Для сумм используем 0 если None, но помечаем что данные неполные
         if mrr_total is not None:
             total_mrr += mrr_total
         else:
             has_missing_data = True
+        if revenue_total is None:
+            has_missing_data = True
         if mrr_delta is not None:
             total_mrr_delta += mrr_delta
         if inst_delta is not None:
             total_inst_delta += inst_delta
-        lines.append(f"<b>{_escape_html(name)}</b>")
-        lines.append(f"💰 MRR: ${_fmt_num(mrr_total)} {_fmt_delta(mrr_delta, is_mrr=True)}")
-        lines.append(f"📲 Installs: {_fmt_num(inst_total)} {_fmt_delta(inst_delta)}")
-        lines.append("")
+        if revenue_total is not None:
+            total_revenue += revenue_total
+        if revenue_per_day is not None:
+            total_revenue_per_day += revenue_per_day
+        if arr_total is not None:
+            total_arr += arr_total
+        if arr_delta is not None:
+            total_arr_delta += arr_delta
+        if (
+            conv_rate is not None
+            and inst_total is not None
+            and int(inst_total) > 0
+        ):
+            conv_weighted_sum += float(conv_rate) * int(inst_total)
+            conv_weighted_installs += int(inst_total)
+        if r.get("is_visible", True):
+            lines.append(f"<b>{_escape_html(name)}</b>")
+            lines.append(f"💰 MRR (на дату): ${_fmt_num(mrr_total)} {_fmt_delta(mrr_delta, is_mrr=True)}")
+            lines.append(f"💵 Revenue (месяц): ${_fmt_num(revenue_total)} {_fmt_delta(revenue_per_day, is_mrr=True)}")
+            lines.append(f"📲 Installs (месяц): {_fmt_num(inst_total)} {_fmt_delta(inst_delta)}")
+            conv_str = f"{conv_rate:.2f}%" if conv_rate is not None else "N/A"
+            lines.append(f"🔄 Conv. Install→Paid (месяц): {conv_str}")
+            lines.append("")
     lines.append("<b>Total</b>")
     if has_missing_data:
         lines.append("⚠️ <i>Некоторые данные недоступны, сумма может быть неполной</i>")
-    lines.append(f"💰 Total MRR: ${_fmt_num(total_mrr)} {_fmt_delta(total_mrr_delta, is_mrr=True)}")
+    total_weighted_conv = (
+        conv_weighted_sum / conv_weighted_installs
+        if conv_weighted_installs > 0
+        else None
+    )
+    total_conv_str = f"{total_weighted_conv:.2f}%" if total_weighted_conv is not None else "N/A"
+    lines.append(f"💰 Total MRR (на дату): ${_fmt_num(total_mrr)} {_fmt_delta(total_mrr_delta, is_mrr=True)}")
+    lines.append(f"📈 Total ARR (на дату): ${_fmt_num(total_arr)} {_fmt_delta(total_arr_delta, is_mrr=True)}")
+    lines.append(f"💵 Total Revenue (месяц): ${_fmt_num(total_revenue)} {_fmt_delta(total_revenue_per_day, is_mrr=True)}")
     lines.append(f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}")
+    lines.append(f"🔄 Total Conv. (месяц): {total_conv_str}")
     text = "\n".join(lines).strip()
     return ReportBuildResult(text=text, report_date=resolved_report_date, anomalies=anomalies)
 

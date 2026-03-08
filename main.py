@@ -35,7 +35,17 @@ def main() -> None:
         action="store_true",
         help="Один запрос к Adapty (MRR для первого приложения), вывести сырой ответ и выйти",
     )
+    parser.add_argument(
+        "--debug-conversion",
+        action="store_true",
+        help="Запрос Conversion API (Install→Paid) для первого приложения, вывести сырой ответ",
+    )
     args = parser.parse_args()
+
+    if args.debug_conversion:
+        from adapty_client import _debug_conversion_response
+        _debug_conversion_response()
+        return
 
     if args.debug_adapty:
         from adapty_client import _debug_adapty_response

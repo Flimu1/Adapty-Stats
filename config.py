@@ -19,6 +19,7 @@ class AppConfig:
     """Один проект Adapty: ключ API и отображаемое имя."""
     api_key: str
     name: str
+    is_visible: bool = True
 
 
 def _get_apps_from_env() -> list[AppConfig]:
@@ -30,7 +31,9 @@ def _get_apps_from_env() -> list[AppConfig]:
         name = os.getenv(f"ADAPTY_APP_NAME_{n}", "").strip() or f"App {n}"
         if not key or not key.strip():
             break
-        apps.append(AppConfig(api_key=key.strip(), name=name or f"App {n}"))
+        visible_raw = os.getenv(f"ADAPTY_APP_VISIBLE_{n}", "true").strip().lower()
+        is_visible = visible_raw != "false"
+        apps.append(AppConfig(api_key=key.strip(), name=name or f"App {n}", is_visible=is_visible))
         n += 1
     return apps
 
@@ -95,6 +98,13 @@ def get_adapty_analytics_path() -> str:
     """Путь к эндпоинту Retrieve analytics data."""
     return os.getenv(
         "ADAPTY_ANALYTICS_PATH", "api/v1/client-api/metrics/analytics/"
+    ).strip().lstrip("/")
+
+
+def get_adapty_conversion_path() -> str:
+    """Путь к эндпоинту Retrieve conversion data (Install → Paid и др.)."""
+    return os.getenv(
+        "ADAPTY_CONVERSION_PATH", "api/v1/client-api/metrics/conversion/"
     ).strip().lstrip("/")
 
 

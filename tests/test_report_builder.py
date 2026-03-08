@@ -91,8 +91,8 @@ class TestReportBuilder(unittest.TestCase):
         text = build_report_text()
         self.assertIn("<b>App One</b>", text)
         self.assertIn("<b>App Two</b>", text)
-        self.assertIn("💰 MRR:", text)
-        self.assertIn("📲 Installs:", text)
+        self.assertIn("💰 MRR", text)
+        self.assertIn("📲 Installs", text)
 
     @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
     def test_report_uses_provided_report_date_in_header(self, _mock_fetch):

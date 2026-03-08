@@ -6,7 +6,7 @@ API: POST /api/v1/client-api/metrics/analytics/ (api-admin.adapty.io)
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
-from typing import Any, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import requests
@@ -17,6 +17,7 @@ from config import (
     get_adapty_apps,
     get_adapty_base_url,
     get_adapty_analytics_path,
+    get_adapty_conversion_path,
     get_adapty_timezone,
 )
 
@@ -121,10 +122,10 @@ def _fetch_chart(
                         pass
         return None
 
-    # Для MRR берём выручку как в дашборде (revenue / gross_revenue).
+    # Для MRR и ARR берём выручку как в дашборде (revenue / gross_revenue).
     # proceeds — это выручка после комиссий, она заметно ниже и не совпадает с карточкой MRR.
-    if chart_id == "mrr":
-        for key in ("revenue", "gross_revenue", "proceeds", "mrr"):
+    if chart_id in ("mrr", "arr"):
+        for key in ("revenue", "gross_revenue", "proceeds", "mrr", "arr"):
             metric = data_obj.get(key)
             if metric is not None and isinstance(metric, dict):
                 val = _value_from_metric(metric, as_float=True)
@@ -132,6 +133,18 @@ def _fetch_chart(
                     return float(val)
         logger.warning(
             "Adapty API: метрика MRR/revenue не найдена, keys=%s", list(data_obj.keys())
+        )
+        return None
+
+    elif chart_id == "revenue":
+        for key in ("revenue", "gross_revenue", "proceeds"):
+            metric = data_obj.get(key)
+            if metric is not None and isinstance(metric, dict):
+                val = _value_from_metric(metric, as_float=True)
+                if val is not None:
+                    return float(val)
+        logger.warning(
+            "Adapty API: метрика revenue не найдена, keys=%s", list(data_obj.keys())
         )
         return None
 
@@ -149,6 +162,162 @@ def _fetch_chart(
         list(data_obj.keys()),
     )
     return None
+
+
+def _fetch_conversion(
+    api_key: str,
+    base_url: str,
+    path: str,
+    timezone: str,
+    date_from: datetime,
+    date_to: datetime,
+) -> Optional[float]:
+    """
+    Запрашивает когортную конверсию Install → Paid через Adapty Conversion API.
+    Возвращает значение конверсии (процент 0–100 или доля 0–1) как float или None при ошибке.
+    """
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json",
+        "Adapty-Tz": timezone,
+    }
+    body = {
+        "filters": {
+            "date": [date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")],
+        },
+        "from_period": None,
+        "to_period": 1,
+        "period_unit": "month",
+        "date_type": "profile_install_date",
+        "format": "json",
+    }
+    try:
+        session = _get_session()
+        resp = session.post(url, json=body, headers=headers, timeout=30)
+        logger.debug(
+            "Adapty Conversion API response: status=%s body=%s",
+            resp.status_code,
+            resp.text[:500] if resp.text else "(empty)",
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.exception("Adapty Conversion API request failed: %s", e)
+        return None
+    except ValueError as e:
+        logger.exception("Adapty Conversion API invalid JSON: %s", e)
+        return None
+
+    # Извлекаем значение конверсии из data (процент или доля)
+    # API может вернуть data как массив [{value: X}] или объект {value: X}; также value на корне
+    data_obj = data.get("data")
+    root_value = data.get("value")
+    if root_value is not None and isinstance(root_value, (int, float)):
+        try:
+            return float(root_value)
+        except (TypeError, ValueError):
+            pass
+
+    if data_obj is None:
+        return None
+
+    def _extract_float(obj: Any) -> Optional[float]:
+        if obj is None:
+            return None
+        if isinstance(obj, (int, float)):
+            try:
+                return float(obj)
+            except (TypeError, ValueError):
+                return None
+        if isinstance(obj, dict):
+            for key in ("value", "conversion", "rate", "percentage", "conv"):
+                val = obj.get(key)
+                if val is not None and isinstance(val, (int, float)):
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        pass
+            # data может содержать массив по периодам — берём последнее/среднее
+            arr = obj.get("data")
+            if isinstance(arr, list) and arr:
+                last = arr[-1] if isinstance(arr[-1], dict) else None
+                if last:
+                    return _extract_float(last.get("value") or last.get("y"))
+        if isinstance(obj, list) and obj:
+            return _extract_float(obj[-1])
+        return None
+
+    # data может быть массивом периодов [{value, ...}, ...]
+    result = _extract_float(data_obj)
+    if result is not None:
+        # Если API вернул долю (0–1), приводим к проценту (0–100)
+        if 0 <= result <= 1:
+            result = result * 100
+        return float(result)
+    logger.warning(
+        "Adapty Conversion API: значение конверсии не найдено, data keys=%s",
+        list(data_obj.keys()) if isinstance(data_obj, dict) else type(data_obj),
+    )
+    return None
+
+
+def _debug_conversion_response() -> None:
+    """
+    Запрос Conversion API (Install→Paid) для первого приложения.
+    Выводит сырой ответ для сверки с дашбордом Adapty.
+    Запуск: python main.py --debug-conversion
+    """
+    import json
+    apps = get_adapty_apps()
+    base_url = get_adapty_base_url()
+    path = get_adapty_conversion_path()
+    tz_str = get_adapty_timezone()
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = ZoneInfo("Europe/Minsk")
+    now_local = datetime.now(tz)
+    target_date = now_local.date()
+    start_of_month = target_date.replace(day=1)
+    date_from = datetime(start_of_month.year, start_of_month.month, start_of_month.day)
+    date_to = datetime(target_date.year, target_date.month, target_date.day)
+    app = apps[0]
+    print("=== Adapty Conversion API (Install→Paid) ===")
+    print(f"App: {app.name}")
+    print(f"Period: {date_from.date()} — {date_to.date()}")
+    print()
+    conv = _fetch_conversion(app.api_key, base_url, path, tz_str, date_from, date_to)
+    print(f"Parsed conversion: {f'{conv:.2f}%' if conv is not None else 'N/A'}")
+    print()
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Api-Key {app.api_key}",
+        "Content-Type": "application/json",
+        "Adapty-Tz": tz_str,
+    }
+    body = {
+        "filters": {"date": [date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")]},
+        "from_period": None,
+        "to_period": 1,
+        "period_unit": "month",
+        "date_type": "profile_install_date",
+        "format": "json",
+    }
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        print("Raw response status:", resp.status_code)
+        print("Raw response body:")
+        if resp.text:
+            try:
+                j = resp.json()
+                print(json.dumps(j, indent=2, ensure_ascii=False))
+            except Exception:
+                print(resp.text[:2000])
+        else:
+            print("(empty)")
+    except Exception as e:
+        print("Request failed:", e)
 
 
 def _debug_adapty_response() -> None:
@@ -223,30 +392,47 @@ def fetch_metrics_for_app(
     timezone: str,
     date_from: datetime,
     date_to: datetime,
+    conversion_path: Optional[str] = None,
 ) -> dict[str, Union[float, int, None]]:
     """
-    Два запроса к Adapty (mrr + installs) за период [date_from, date_to].
-    Возвращает dict с ключами mrr, installs.
+    Четыре запроса к Adapty (mrr + installs + revenue + arr) и конверсия Install→Paid.
+    Возвращает dict с ключами mrr, installs, revenue, arr, install_to_paid_conv.
     Значения могут быть None при ошибке запроса.
     """
     mrr = _fetch_chart(api_key, base_url, path, timezone, "mrr", date_from, date_to)
     installs = _fetch_chart(
         api_key, base_url, path, timezone, "installs", date_from, date_to
     )
-    return {"mrr": mrr, "installs": installs}
+    revenue = _fetch_chart(
+        api_key, base_url, path, timezone, "revenue", date_from, date_to
+    )
+    arr = _fetch_chart(api_key, base_url, path, timezone, "arr", date_from, date_to)
+    install_to_paid_conv = None
+    if conversion_path:
+        install_to_paid_conv = _fetch_conversion(
+            api_key, base_url, conversion_path, timezone, date_from, date_to
+        )
+    return {
+        "mrr": mrr,
+        "installs": installs,
+        "revenue": revenue,
+        "arr": arr,
+        "install_to_paid_conv": install_to_paid_conv,
+    }
 
 
-def _fetch_mrr_last_two_days(
+def _fetch_revenue_metric_last_two_days(
     api_key: str,
     base_url: str,
     path: str,
     timezone: str,
     date_yesterday: datetime,
     date_today: datetime,
+    chart_id: str = "mrr",
 ) -> Tuple[Union[float, None], Union[float, None]]:
     """
-    Запрашивает MRR за (вчера, сегодня) в календарных днях (в timezone отчёта).
-    Возвращает (mrr_yesterday, mrr_today) по последним двум точкам data[0].values.
+    Запрашивает метрику выручки (MRR или ARR) за (вчера, сегодня) в календарных днях (в timezone отчёта).
+    Возвращает (yesterday, today) по последним двум точкам data[0].values.
     При ошибке возвращает (None, None).
     Так дельта совпадает с дашбордом Adapty (5 фев = 307.07, 6 фев = 348.2).
     """
@@ -257,7 +443,7 @@ def _fetch_mrr_last_two_days(
         "Adapty-Tz": timezone,
     }
     body = {
-        "chart_id": "mrr",
+        "chart_id": chart_id,
         "filters": {
             "date": [date_yesterday.strftime("%Y-%m-%d"), date_today.strftime("%Y-%m-%d")],
         },
@@ -270,11 +456,11 @@ def _fetch_mrr_last_two_days(
         resp.raise_for_status()
         data = resp.json()
     except (requests.RequestException, ValueError) as e:
-        logger.warning("MRR two-day request failed: %s", e)
+        logger.warning("%s two-day request failed: %s", chart_id, e)
         return None, None
 
     data_obj = data.get("data") or {}
-    for key in ("revenue", "gross_revenue", "proceeds", "mrr"):
+    for key in ("revenue", "gross_revenue", "proceeds", "mrr", "arr"):
         metric = data_obj.get(key)
         if not metric or not isinstance(metric, dict):
             continue
@@ -310,6 +496,7 @@ def fetch_all_metrics(
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
     path = get_adapty_analytics_path()
+    conversion_path = get_adapty_conversion_path()
     tz_str = get_adapty_timezone()
 
     # Текущий месяц и «вчера/сегодня» в timezone отчёта (как в Adapty)
@@ -335,22 +522,46 @@ def fetch_all_metrics(
 
     results: list[dict[str, Any]] = []
 
-    def job(app_index: int, app_key: str, app_name: str) -> dict[str, Any]:
+    def job(app_index: int, app_key: str, app_name: str, is_visible: bool) -> dict[str, Any]:
         # Метрики за месяц (MRR на конец периода, installs — сумма за месяц)
         month_data = fetch_metrics_for_app(
-            app_key, base_url, path, tz_str, date_start_month, date_target
+            app_key,
+            base_url,
+            path,
+            tz_str,
+            date_start_month,
+            date_target,
+            conversion_path=conversion_path,
         )
         mrr_month = month_data.get("mrr")
         inst_month = month_data.get("installs")
+        revenue_month = month_data.get("revenue")
+        arr_total = month_data.get("arr")
+        conv_rate = month_data.get("install_to_paid_conv")
 
         # Дельта MRR за сутки: предыдущий закрытый день vs report_date.
-        mrr_yesterday, mrr_today = _fetch_mrr_last_two_days(
-            app_key, base_url, path, tz_str, date_prev, date_target
+        mrr_yesterday, mrr_today = _fetch_revenue_metric_last_two_days(
+            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="mrr"
         )
         if mrr_today is not None and mrr_yesterday is not None:
             mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
         else:
             mrr_delta_24h = None
+
+        # Дельта ARR за сутки
+        arr_yesterday, arr_today = _fetch_revenue_metric_last_two_days(
+            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="arr"
+        )
+        if arr_today is not None and arr_yesterday is not None:
+            arr_delta_24h = float(arr_today) - float(arr_yesterday)
+        else:
+            arr_delta_24h = None
+
+        # Revenue за сутки (выручка за report_date)
+        _, rev_today = _fetch_revenue_metric_last_two_days(
+            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="revenue"
+        )
+        revenue_per_day = float(rev_today) if rev_today is not None else None
 
         # Установки за report_date: один календарный день.
         inst_today = _fetch_chart(
@@ -365,11 +576,17 @@ def fetch_all_metrics(
             "mrr_delta_24h": mrr_delta_24h,
             "installs_total": inst_month,
             "installs_delta_24h": inst_delta_24h,
+            "revenue_total": revenue_month,
+            "revenue_per_day": revenue_per_day,
+            "arr_total": arr_total,
+            "arr_delta_24h": arr_delta_24h,
+            "conv_rate": conv_rate,
+            "is_visible": is_visible,
         }
 
     with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:
         futures = {
-            executor.submit(job, i, app.api_key, app.name): i
+            executor.submit(job, i, app.api_key, app.name, app.is_visible): i
             for i, app in enumerate(apps)
         }
         for future in as_completed(futures):
@@ -386,6 +603,12 @@ def fetch_all_metrics(
                         "mrr_delta_24h": None,
                         "installs_total": None,
                         "installs_delta_24h": None,
+                        "revenue_total": None,
+                        "revenue_per_day": None,
+                        "arr_total": None,
+                        "arr_delta_24h": None,
+                        "conv_rate": None,
+                        "is_visible": apps[idx].is_visible,
                     }
                 )
 
