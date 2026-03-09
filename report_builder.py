@@ -84,7 +84,11 @@ def _detect_anomalies(rows: list[dict]) -> list[str]:
         if inst_delta is None:
             missing_fields.append("Installs day")
         if missing_fields:
-            anomalies.append(f"{name}: отсутствуют поля ({', '.join(missing_fields)}).")
+            msg = f"{name}: отсутствуют поля ({', '.join(missing_fields)})."
+            if len(missing_fields) == 4:
+                app_num = r.get("index", 0) + 1
+                msg += f" Возможная причина: 401 Unauthorized — проверьте ADAPTY_API_KEY_APP{app_num}."
+            anomalies.append(msg)
 
         if mrr_total is not None and mrr_total < 0:
             anomalies.append(f"{name}: MRR за месяц отрицательный ({mrr_total:.2f}).")
