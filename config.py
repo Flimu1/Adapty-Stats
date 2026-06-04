@@ -163,7 +163,7 @@ def get_adapty_timezone() -> str:
     return MINSK_TIMEZONE
 
 
-# Файл для хранения времени сбора (переопределяет REPORT_TIME из env)
+# Файл для хранения времени сбора (локальный override, если REPORT_TIME не задан)
 _REPORT_TIME_FILE = os.path.join(os.path.dirname(__file__), "data", "report_time.txt")
 
 
@@ -182,10 +182,13 @@ def _read_report_time_from_file() -> Optional[str]:
 
 def get_report_time() -> str:
     """Время отправки отчёта (часы:минуты), например '09:00'."""
+    from_env = os.getenv("REPORT_TIME", "").strip()
+    if from_env:
+        return from_env
     from_file = _read_report_time_from_file()
     if from_file is not None:
         return from_file
-    return os.getenv("REPORT_TIME", "09:00")
+    return "09:00"
 
 
 def set_report_time(time_str: str) -> tuple[bool, str]:
