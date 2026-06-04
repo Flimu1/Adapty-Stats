@@ -52,6 +52,14 @@ class TestReportBuilder(unittest.TestCase):
         self.assertIn("Total Downloads", text)
 
     @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
+    def test_report_does_not_include_legacy_explainer_text(self, _mock_fetch):
+        from report_builder import build_report_text
+
+        text = build_report_text()
+        self.assertNotIn("MRR, ARR — на дату", text)
+        self.assertNotIn("Revenue, Installs, Conv — за месяц", text)
+
+    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
     def test_total_mrr_is_sum_of_current_mrr(self, _mock_fetch):
         from report_builder import build_report_text
 

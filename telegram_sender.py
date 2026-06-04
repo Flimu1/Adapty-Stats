@@ -6,14 +6,17 @@ from typing import Optional
 
 import requests
 
-from config import get_telegram_chat_id, get_telegram_token, get_telegram_topic_id
+from config import (
+    get_telegram_admin_id,
+    get_telegram_chat_id,
+    get_telegram_token,
+    get_telegram_topic_id,
+)
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot"
 
-
-from typing import Optional
 
 def send_message(text: str, parse_mode: str = "HTML", chat_id: Optional[str] = None) -> bool:
     """Отправляет сообщение в чат (опционально в указанный топик). Возвращает True при успехе.
@@ -52,8 +55,17 @@ def test_send() -> bool:
     Ручная отправка тестового отчёта (без запроса к Adapty).
     Можно вызывать из main при аргументе командной строки или по необходимости.
     """
-    from report_builder import build_report_text
-    text = build_report_text()
+    text = build_report_text_for_test()
     if not text:
         text = "📊 Тестовый отчёт\n\nДанные не получены. Проверьте логи и настройки Adapty."
-    return send_message(text)
+    admin_id = get_telegram_admin_id()
+    if admin_id:
+        return send_message(text, chat_id=admin_id)
+    logger.error("TELEGRAM_ADMIN_ID is not set; test_send will not send to group chat")
+    return False
+
+
+def build_report_text_for_test() -> str:
+    from report_builder import build_report_text
+
+    return build_report_text()

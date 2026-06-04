@@ -108,6 +108,45 @@ def get_adapty_conversion_path() -> str:
     ).strip().lstrip("/")
 
 
+def get_adapty_funnel_path() -> str:
+    """Путь к эндпоинту Retrieve funnel data."""
+    return os.getenv(
+        "ADAPTY_FUNNEL_PATH", "api/v1/client-api/metrics/funnel/"
+    ).strip().lstrip("/")
+
+
+def is_ab_test_report_enabled() -> bool:
+    """Включён ли отдельный Telegram-отчёт по A/B-тесту."""
+    raw = os.getenv("AB_TEST_REPORT_ENABLED", "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def get_ab_test_app_index() -> int:
+    """Номер приложения из ADAPTY_API_KEY_APP{N}, для которого строить A/B-отчёт."""
+    raw = os.getenv("AB_TEST_APP_INDEX", "1").strip()
+    try:
+        idx = int(raw)
+    except ValueError:
+        raise ValueError("AB_TEST_APP_INDEX должен быть целым числом")
+    if idx < 1:
+        raise ValueError("AB_TEST_APP_INDEX должен быть >= 1")
+    return idx
+
+
+def get_ab_test_name() -> str:
+    return os.getenv("AB_TEST_NAME", "").strip()
+
+
+def get_ab_test_start_date() -> str:
+    return os.getenv("AB_TEST_START_DATE", "").strip()
+
+
+def get_ab_test_variant_value(variant: str, field: str) -> str:
+    """Читает AB_TEST_VARIANT_{A/B}_{LABEL/PAYWALL_ID/PAYWALL_NAME}."""
+    key = f"AB_TEST_VARIANT_{variant.upper()}_{field.upper()}"
+    return os.getenv(key, "").strip()
+
+
 def get_timezone() -> str:
     """
     Единая таймзона проекта: Europe/Minsk.

@@ -36,6 +36,26 @@ def _send_daily_job() -> None:
         report = build_report()
         if send_message(report.text):
             logger.info("Daily report sent successfully")
+            try:
+                from ab_test_report import build_ab_test_report
+
+                ab_report = build_ab_test_report(report_date=report.report_date)
+                if ab_report:
+                    if send_message(ab_report):
+                        logger.info("A/B test report sent successfully")
+                    else:
+                        logger.error("Failed to send A/B test report")
+            except Exception as ab_err:
+                logger.exception("A/B test report failed: %s", ab_err)
+                admin_id = get_telegram_admin_id()
+                if admin_id:
+                    try:
+                        send_message(
+                            f"⚠️ Ошибка при отправке A/B отчёта: {ab_err}",
+                            chat_id=admin_id,
+                        )
+                    except Exception as send_err:
+                        logger.exception("Failed to send A/B error notification: %s", send_err)
             if report.anomalies:
                 logger.warning(
                     "Anomalies detected for report date %s: %s",

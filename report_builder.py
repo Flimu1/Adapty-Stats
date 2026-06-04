@@ -129,8 +129,6 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
         f"📊 Отчёт на {date_str}",
         f"🕒 Срез на {snapshot_time} ({snapshot_tz})",
         "",
-        "<i>MRR, ARR — на дату. Revenue, Installs, Conv — за месяц. В скобках: Revenue — за сутки, MRR/ARR/Installs — дельта за сутки.</i>",
-        "",
     ]
     if anomalies:
         lines.append("⚠️ <b>Обнаружены аномалии в данных, проверьте источники</b>")
