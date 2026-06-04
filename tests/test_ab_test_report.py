@@ -12,6 +12,7 @@ def _mock_enabled_config():
     return AbTestConfig(
         enabled=True,
         app_index=1,
+        app_name="Unfollowers: Follow & Unfollow",
         test_name="Unfollowers: Follow & Unfollow",
         start_date=date(2026, 6, 1),
         variant_a=AbTestVariantConfig(
@@ -58,6 +59,7 @@ class TestAbTestReport(unittest.TestCase):
         text = build_ab_test_report(report_date=date(2026, 6, 4))
 
         self.assertIn("🧪 A/B Test: Unfollowers: Follow &amp; Unfollow", text)
+        self.assertIn("📱 App: Unfollowers: Follow &amp; Unfollow", text)
         self.assertIn("<b>Variant A / Old Paywall</b>", text)
         self.assertIn("💵 Revenue: $1,234.56", text)
         self.assertIn("📲 Paywall views: 1,200", text)
@@ -89,6 +91,7 @@ class TestAbTestReport(unittest.TestCase):
         mock_config.return_value = AbTestConfig(
             enabled=False,
             app_index=1,
+            app_name="",
             test_name="Unfollowers: Follow & Unfollow",
             start_date=date(2026, 6, 1),
             variant_a=AbTestVariantConfig("Variant A", "a", "A"),

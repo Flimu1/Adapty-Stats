@@ -35,6 +35,7 @@ class AbTestVariantConfig:
 class AbTestConfig:
     enabled: bool
     app_index: int
+    app_name: str
     test_name: str
     start_date: date
     variant_a: AbTestVariantConfig
@@ -101,6 +102,7 @@ def get_ab_test_config() -> AbTestConfig:
         return AbTestConfig(
             enabled=False,
             app_index=1,
+            app_name="",
             test_name="",
             start_date=date.today(),
             variant_a=AbTestVariantConfig("", "", ""),
@@ -122,9 +124,17 @@ def get_ab_test_config() -> AbTestConfig:
         )
         return AbTestVariantConfig(label=label, paywall_id=paywall_id, paywall_name=paywall_name)
 
+    app_index = get_ab_test_app_index()
+    apps = get_adapty_apps()
+    if app_index > len(apps):
+        raise ValueError(
+            f"AB_TEST_APP_INDEX={app_index} не найден: настроено приложений {len(apps)}"
+        )
+
     return AbTestConfig(
         enabled=True,
-        app_index=get_ab_test_app_index(),
+        app_index=app_index,
+        app_name=apps[app_index - 1].name,
         test_name=test_name,
         start_date=start_date,
         variant_a=variant_config("A", "Variant A"),
@@ -371,6 +381,7 @@ def build_ab_test_report(report_date: Optional[date] = None) -> Optional[str]:
     rows = fetch_ab_test_metrics(config, report_date)
     lines = [
         f"🧪 A/B Test: {_escape_html(config.test_name)}",
+        f"📱 App: {_escape_html(config.app_name)}",
         "",
     ]
     for row in rows:
