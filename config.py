@@ -108,6 +108,13 @@ def get_adapty_conversion_path() -> str:
     ).strip().lstrip("/")
 
 
+def get_adapty_cohort_path() -> str:
+    """Путь к эндпоинту Retrieve cohort data."""
+    return os.getenv(
+        "ADAPTY_COHORT_PATH", "api/v1/client-api/metrics/cohort/"
+    ).strip().lstrip("/")
+
+
 def get_adapty_funnel_path() -> str:
     """Путь к эндпоинту Retrieve funnel data."""
     return os.getenv(

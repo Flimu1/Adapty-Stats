@@ -16,6 +16,7 @@ from config import (
     get_adapty_analytics_path,
     get_adapty_apps,
     get_adapty_base_url,
+    get_adapty_cohort_path,
     get_adapty_funnel_path,
     get_adapty_timezone,
     is_ab_test_report_enabled,
@@ -49,6 +50,7 @@ class AbTestVariantMetrics:
     revenue: Optional[float]
     paywall_views: Optional[int]
     purchases: Optional[int]
+    arpas: Optional[float] = None
 
     @property
     def conversion_rate(self) -> Optional[float]:
@@ -246,6 +248,77 @@ def _fetch_variant_revenue(
     return _extract_revenue(data)
 
 
+def _float_value(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_arpas(data: Optional[dict[str, Any]]) -> Optional[float]:
+    if not data:
+        return None
+    rows = data.get("data")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    for row in rows:
+        if isinstance(row, dict) and row.get("type") == "total":
+            val = _float_value(row.get("total_arpas_usd"))
+            if val is not None:
+                return val
+
+    first_row = rows[0]
+    if isinstance(first_row, dict):
+        val = _float_value(first_row.get("total_arpas_usd"))
+        if val is not None:
+            return val
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        values = row.get("values")
+        if not isinstance(values, list):
+            continue
+        for value in reversed(values):
+            if not isinstance(value, dict):
+                continue
+            val = _float_value(value.get("arpas_usd"))
+            if val is not None:
+                return val
+    return None
+
+
+def _fetch_variant_arpas(
+    api_key: str,
+    base_url: str,
+    path: str,
+    timezone: str,
+    paywall_id: str,
+    start_date: date,
+    end_date: date,
+) -> Optional[float]:
+    data = _post_adapty(
+        api_key,
+        base_url,
+        path,
+        timezone,
+        {
+            "filters": {
+                "date": [start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")],
+                "paywall_id": [paywall_id],
+            },
+            "period_unit": "day",
+            "period_type": "days",
+            "value_type": "absolute",
+            "value_field": "arpas",
+            "accounting_type": "revenue",
+            "format": "json",
+        },
+    )
+    return _extract_arpas(data)
+
+
 def _extract_funnel_metrics(data: Optional[dict[str, Any]]) -> tuple[Optional[int], Optional[int]]:
     if not data:
         return None, None
@@ -325,6 +398,7 @@ def fetch_ab_test_metrics(
     app = apps[app_index]
     base_url = get_adapty_base_url()
     analytics_path = get_adapty_analytics_path()
+    cohort_path = get_adapty_cohort_path()
     funnel_path = get_adapty_funnel_path()
     timezone = get_adapty_timezone()
 
@@ -334,6 +408,15 @@ def fetch_ab_test_metrics(
             app.api_key,
             base_url,
             analytics_path,
+            timezone,
+            variant.paywall_id,
+            config.start_date,
+            report_date,
+        )
+        arpas = _fetch_variant_arpas(
+            app.api_key,
+            base_url,
+            cohort_path,
             timezone,
             variant.paywall_id,
             config.start_date,
@@ -355,6 +438,7 @@ def fetch_ab_test_metrics(
                 revenue=revenue,
                 paywall_views=paywall_views,
                 purchases=purchases,
+                arpas=arpas,
             )
         )
     return rows
@@ -387,6 +471,7 @@ def build_ab_test_report(report_date: Optional[date] = None) -> Optional[str]:
     for row in rows:
         lines.append(f"<b>{_escape_html(row.label)} / {_escape_html(row.paywall_name)}</b>")
         lines.append(f"💵 Revenue: {_fmt_money(row.revenue)}")
+        lines.append(f"📈 ARPAS: {_fmt_money(row.arpas)}")
         lines.append(f"📲 Paywall views: {_fmt_num(row.paywall_views)}")
         lines.append(f"💳 Purchases: {_fmt_num(row.purchases)}")
         lines.append(f"🔄 CR view→purchase: {_fmt_rate(row.conversion_rate)}")
