@@ -184,6 +184,32 @@ def get_apple_ads_attribution_source() -> str:
     return os.getenv("APPLE_ADS_ATTRIBUTION_SOURCE", "apple_search_ads").strip()
 
 
+def get_adapty_asa_api_base_url() -> str:
+    return os.getenv(
+        "ADAPTY_ASA_API_BASE_URL",
+        "https://api-asa-admin.adapty.io/api/v1",
+    ).rstrip("/")
+
+
+def get_adapty_dashboard_token() -> str:
+    return (
+        os.getenv("ADAPTY_DASHBOARD_TOKEN", "").strip()
+        or os.getenv("ADAPTY_ASA_AUTH_TOKEN", "").strip()
+    )
+
+
+def get_adapty_dashboard_company_id() -> str:
+    return os.getenv("ADAPTY_DASHBOARD_COMPANY_ID", "").strip()
+
+
+def get_adapty_dashboard_app_id() -> str:
+    return os.getenv("ADAPTY_DASHBOARD_APP_ID", "").strip()
+
+
+def get_apple_ads_internal_app_id() -> str:
+    return os.getenv("APPLE_ADS_INTERNAL_APP_ID", "").strip()
+
+
 def get_apple_ads_metrics_paths() -> list[str]:
     """
     Возможные пути к Adapty Ads Manager metrics endpoint.

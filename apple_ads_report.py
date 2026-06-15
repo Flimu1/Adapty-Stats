@@ -11,17 +11,18 @@ from typing import Any, Optional
 import requests
 
 from config import (
-    get_adapty_analytics_path,
     get_adapty_apps,
-    get_adapty_base_url,
-    get_adapty_timezone,
+    get_adapty_asa_api_base_url,
+    get_adapty_dashboard_app_id,
+    get_adapty_dashboard_company_id,
+    get_adapty_dashboard_token,
     get_apple_ads_app_index,
     get_apple_ads_adam_id,
     get_apple_ads_api_base_url,
     get_apple_ads_attribution_source,
     get_apple_ads_client_id,
+    get_apple_ads_internal_app_id,
     get_apple_ads_key_id,
-    get_apple_ads_metrics_paths,
     get_apple_ads_org_id,
     get_apple_ads_private_key,
     get_apple_ads_report_title,
@@ -31,6 +32,8 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+ASA_BY_DAYS = [0, 3, 7, 14, 28, 31, 61, 92, 183, 366]
 
 
 @dataclass
@@ -52,20 +55,26 @@ class AppleAdsMetrics:
 
     @property
     def roas(self) -> Optional[float]:
-        if self.spend is None or self.revenue is None or self.spend <= 0:
+        if self.spend is None or self.revenue is None:
             return None
+        if self.spend <= 0:
+            return 0.0
         return (float(self.revenue) / float(self.spend)) * 100.0
 
     @property
     def cpi(self) -> Optional[float]:
-        if self.spend is None or self.installs is None or self.installs <= 0:
+        if self.spend is None or self.installs is None:
             return None
+        if self.installs <= 0:
+            return 0.0
         return float(self.spend) / float(self.installs)
 
     @property
     def cpa(self) -> Optional[float]:
-        if self.spend is None or self.paid is None or self.paid <= 0:
+        if self.spend is None or self.paid is None:
             return None
+        if self.paid <= 0:
+            return 0.0
         return float(self.spend) / float(self.paid)
 
 
@@ -109,23 +118,28 @@ def get_apple_ads_report_config() -> AppleAdsReportConfig:
     )
 
 
-def _headers(api_key: str, timezone: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json",
-        "Adapty-Tz": timezone,
-    }
-
-
 def _date_filter(start_date: date, end_date: date) -> list[str]:
     return [start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")]
 
 
-def _filters(config: AppleAdsReportConfig, report_date: date) -> dict[str, Any]:
-    filters: dict[str, Any] = {"date": _date_filter(config.start_date, report_date)}
-    if config.attribution_source:
-        filters["attribution_source"] = [config.attribution_source]
-    return filters
+def _asa_date_filters(config: AppleAdsReportConfig, report_date: date) -> dict[str, str]:
+    return {
+        "date_from": config.start_date.strftime("%Y-%m-%d"),
+        "date_to": report_date.strftime("%Y-%m-%d"),
+    }
+
+
+def _asa_headers(token: str, company_id: str, app_id: str = "") -> dict[str, str]:
+    auth = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    headers = {
+        "Authorization": auth,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "ADAPTY_DASHBOARD_COMPANY_ID": company_id,
+    }
+    if app_id:
+        headers["ADAPTY_DASHBOARD_APP_ID"] = app_id
+    return headers
 
 
 def _normalize_key(value: str) -> str:
@@ -135,17 +149,46 @@ def _normalize_key(value: str) -> str:
 def _number(value: Any) -> Optional[float]:
     if value is None:
         return None
+    if isinstance(value, str):
+        value = value.strip().replace(",", "").replace("$", "").replace("%", "")
+        if not value:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
+def _metric_scalar(value: Any) -> Optional[float]:
+    direct = _number(value)
+    if direct is not None:
+        return direct
+
+    if isinstance(value, dict):
+        for key in ("amount", "value", "total", "common"):
+            if key in value:
+                nested = _metric_scalar(value.get(key))
+                if nested is not None:
+                    return nested
+        values = value.get("values")
+        if isinstance(values, list):
+            total = 0.0
+            found = False
+            for item in values:
+                item_value = _metric_scalar(item)
+                if item_value is not None:
+                    total += item_value
+                    found = True
+            if found:
+                return total
+    return None
+
+
 def _value_from_metric(metric: Any, as_float: bool) -> Optional[float]:
     if not isinstance(metric, dict):
         return None
 
-    val = _number(metric.get("value"))
+    val = _metric_scalar(metric)
     if val is not None:
         return val if as_float else float(int(val))
 
@@ -200,7 +243,7 @@ def _extract_metric(data: Optional[dict[str, Any]], aliases: tuple[str, ...], as
             continue
         for key, metric in root.items():
             if _normalize_key(str(key)) in normalized_aliases:
-                direct = _number(metric)
+                direct = _metric_scalar(metric)
                 if direct is not None:
                     return direct if as_float else float(int(direct))
                 metric_value = _value_from_metric(metric, as_float=as_float)
@@ -210,94 +253,232 @@ def _extract_metric(data: Optional[dict[str, Any]], aliases: tuple[str, ...], as
     for row in _walk_values(data):
         for key, value in row.items():
             if _normalize_key(str(key)) in normalized_aliases:
-                direct = _number(value)
+                direct = _metric_scalar(value)
                 if direct is not None:
                     return direct if as_float else float(int(direct))
     return None
 
 
-def _post_json(
-    api_key: str,
+def _post_asa_json(
+    token: str,
+    company_id: str,
+    app_id: str,
     base_url: str,
     path: str,
-    timezone: str,
     body: dict[str, Any],
 ) -> Optional[dict[str, Any]]:
-    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    url = f"{base_url.rstrip('/')}/{path.strip('/')}/"
     try:
-        resp = requests.post(url, json=body, headers=_headers(api_key, timezone), timeout=30)
-        logger.debug("Apple Ads API response: path=%s status=%s body=%s", path, resp.status_code, resp.text[:500])
+        resp = requests.post(
+            url,
+            json=body,
+            headers=_asa_headers(token, company_id, app_id),
+            timeout=30,
+        )
+        logger.debug("Adapty ASA response: path=%s status=%s body=%s", path, resp.status_code, resp.text[:500])
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
-        logger.warning("Apple Ads API request failed (path=%s): %s", path, e)
+        logger.warning("Adapty ASA request failed (path=%s): %s", path, e)
         return None
     except ValueError as e:
-        logger.warning("Apple Ads API invalid JSON (path=%s): %s", path, e)
+        logger.warning("Adapty ASA invalid JSON (path=%s): %s", path, e)
         return None
     return data if isinstance(data, dict) else None
 
 
-def _fetch_analytics_chart(
-    api_key: str,
-    base_url: str,
-    analytics_path: str,
-    timezone: str,
+def _extract_asa_metrics(data: Optional[dict[str, Any]]) -> dict[str, Optional[float]]:
+    return {
+        "spend": _extract_metric(
+            data,
+            (
+                "performanceSpend",
+                "performance_spend",
+                "localSpend",
+                "local_spend",
+                "spend",
+                "totalSpend",
+                "total_spend",
+            ),
+            as_float=True,
+        ),
+        "revenue": _extract_metric(
+            data,
+            (
+                "conversionsRevenue",
+                "conversions_revenue",
+                "grossRevenue",
+                "gross_revenue",
+                "revenue",
+            ),
+            as_float=True,
+        ),
+        "installs": _extract_metric(
+            data,
+            (
+                "conversionsInstalls",
+                "conversions_installs",
+                "adaptyInstalls",
+                "adapty_installs",
+                "installs",
+            ),
+            as_float=False,
+        ),
+        "paid": _extract_metric(
+            data,
+            (
+                "conversionsPaid",
+                "conversions_paid",
+                "paid",
+                "subscriptions",
+                "subscriptionsStarted",
+                "subscriptions_started",
+            ),
+            as_float=False,
+        ),
+    }
+
+
+def _asa_apps_info_bodies(config: AppleAdsReportConfig, report_date: date) -> list[dict[str, Any]]:
+    date_range = _date_filter(config.start_date, report_date)
+    date_filters = _asa_date_filters(config, report_date)
+    return [
+        {
+            "filters": {
+                "date": date_range,
+                "pagination": {"number": 1, "size": 500},
+                "include_outdated": True,
+            }
+        },
+        {
+            "filters": {
+                **date_filters,
+                "include_outdated": True,
+            },
+            "pagination": {"number": 1, "size": 500},
+            "by_days": ASA_BY_DAYS,
+        },
+    ]
+
+
+def _candidate_internal_id(row: dict[str, Any]) -> Optional[str]:
+    for key in ("internalId", "internal_id", "appInternalId", "app_internal_id"):
+        value = row.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _row_matches_app(row: dict[str, Any], config: AppleAdsReportConfig, dashboard_app_id: str) -> bool:
+    wanted = {_normalize_key(config.app_name), _normalize_key(config.report_title)}
+    wanted.discard("")
+    for key in ("id", "appId", "app_id", "adaptyAppId", "adapty_app_id"):
+        if dashboard_app_id and str(row.get(key, "")) == dashboard_app_id:
+            return True
+    adam_id = get_apple_ads_adam_id()
+    for key in ("adamId", "adam_id"):
+        if adam_id and str(row.get(key, "")) == adam_id:
+            return True
+    for key in ("name", "title", "appName", "app_name"):
+        normalized = _normalize_key(str(row.get(key, "")))
+        if normalized and normalized in wanted:
+            return True
+    return False
+
+
+def _find_asa_internal_app_id(
+    data: Optional[dict[str, Any]],
+    config: AppleAdsReportConfig,
+    dashboard_app_id: str,
+) -> Optional[str]:
+    if not data:
+        return None
+
+    candidates: list[str] = []
+    for row in _walk_values(data):
+        nested_rows = [row]
+        nested_app = row.get("app")
+        if isinstance(nested_app, dict):
+            nested_rows.append(nested_app)
+        for item in nested_rows:
+            internal_id = _candidate_internal_id(item)
+            if internal_id and _row_matches_app(item, config, dashboard_app_id):
+                return internal_id
+            if internal_id:
+                candidates.append(internal_id)
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    return unique_candidates[0] if len(unique_candidates) == 1 else None
+
+
+def _resolve_asa_internal_app_id(
     config: AppleAdsReportConfig,
     report_date: date,
-    chart_id: str,
-    aliases: tuple[str, ...],
-    as_float: bool,
-) -> Optional[float]:
-    data = _post_json(
-        api_key,
+    token: str,
+    company_id: str,
+    dashboard_app_id: str,
+    base_url: str,
+) -> Optional[str]:
+    configured = get_apple_ads_internal_app_id()
+    if configured:
+        return configured
+
+    for body in _asa_apps_info_bodies(config, report_date):
+        data = _post_asa_json(token, company_id, dashboard_app_id, base_url, "asa-metadata/apps-info", body)
+        internal_id = _find_asa_internal_app_id(data, config, dashboard_app_id)
+        if internal_id:
+            return internal_id
+    logger.warning("Unable to resolve Adapty ASA internal app id for Apple Ads report")
+    return None
+
+
+def _fetch_adapty_asa_metrics(
+    config: AppleAdsReportConfig,
+    report_date: date,
+) -> Optional[dict[str, Optional[float]]]:
+    token = get_adapty_dashboard_token()
+    company_id = get_adapty_dashboard_company_id()
+    dashboard_app_id = get_adapty_dashboard_app_id()
+    if not token or not company_id:
+        logger.warning("Adapty ASA credentials are missing; Apple Ads report will be skipped")
+        return None
+
+    base_url = get_adapty_asa_api_base_url()
+    internal_app_id = _resolve_asa_internal_app_id(
+        config,
+        report_date,
+        token,
+        company_id,
+        dashboard_app_id,
         base_url,
-        analytics_path,
-        timezone,
+    )
+    if not internal_app_id:
+        return None
+
+    data = _post_asa_json(
+        token,
+        company_id,
+        dashboard_app_id,
+        base_url,
+        "asa-metadata/v5/campaign/metrics/overview",
         {
-            "chart_id": chart_id,
-            "filters": _filters(config, report_date),
+            "filters": {
+                **_asa_date_filters(config, report_date),
+                "include_outdated": True,
+                "deleted": False,
+                "cohorts": [],
+                "linked_app_internal_id": [internal_app_id],
+            },
+            "by_days": ASA_BY_DAYS,
+            "profiles_counting_method": "profile_id",
             "period_unit": "day",
-            "date_type": "profile_install_date",
-            "format": "json",
         },
     )
-    return _extract_metric(data, aliases, as_float=as_float)
-
-
-def _fetch_ads_manager_metrics(
-    api_key: str,
-    base_url: str,
-    timezone: str,
-    config: AppleAdsReportConfig,
-    report_date: date,
-) -> dict[str, Optional[float]]:
-    body = {
-        "filters": _filters(config, report_date),
-        "period_unit": "day",
-        "format": "json",
-        "metrics": ["spend", "revenue", "installs", "subscriptions"],
-    }
-    for path in get_apple_ads_metrics_paths():
-        data = _post_json(api_key, base_url, path, timezone, body)
-        if not data:
-            continue
-        spend = _extract_metric(data, ("spend", "cost", "ad_spend", "total_spend"), as_float=True)
-        revenue = _extract_metric(data, ("revenue", "gross_revenue", "total_revenue"), as_float=True)
-        installs = _extract_metric(data, ("installs", "install", "total_installs"), as_float=False)
-        paid = _extract_metric(
-            data,
-            ("paid", "subscriptions", "subscriptions_new", "cost_per_subscription_count"),
-            as_float=False,
-        )
-        if any(v is not None for v in (spend, revenue, installs, paid)):
-            return {
-                "spend": spend,
-                "revenue": revenue,
-                "installs": installs,
-                "paid": paid,
-            }
-    return {"spend": None, "revenue": None, "installs": None, "paid": None}
+    metrics = _extract_asa_metrics(data)
+    if any(value is not None for value in metrics.values()):
+        return metrics
+    logger.warning("Adapty ASA overview returned no Apple Ads metrics")
+    return None
 
 
 def _apple_ads_credentials() -> Optional[dict[str, str]]:
@@ -464,69 +645,19 @@ def _fetch_apple_ads_campaign_totals(
 def fetch_apple_ads_metrics(
     config: AppleAdsReportConfig,
     report_date: date,
-) -> AppleAdsMetrics:
+) -> Optional[AppleAdsMetrics]:
     apps = get_adapty_apps()
-    app = apps[config.app_index - 1]
-    base_url = get_adapty_base_url()
-    analytics_path = get_adapty_analytics_path()
-    timezone = get_adapty_timezone()
+    _ = apps[config.app_index - 1]
 
-    ads_metrics = _fetch_ads_manager_metrics(app.api_key, base_url, timezone, config, report_date)
-    apple_totals = (
-        _fetch_apple_ads_campaign_totals(config, report_date)
-        if ads_metrics.get("spend") is None
-        else {"spend": None, "installs": None}
-    )
-
-    revenue = ads_metrics.get("revenue")
-    if revenue is None:
-        revenue = _fetch_analytics_chart(
-            app.api_key,
-            base_url,
-            analytics_path,
-            timezone,
-            config,
-            report_date,
-            "revenue",
-            ("revenue", "gross_revenue", "proceeds"),
-            as_float=True,
-        )
-
-    installs = ads_metrics.get("installs")
-    if installs is None:
-        installs = _fetch_analytics_chart(
-            app.api_key,
-            base_url,
-            analytics_path,
-            timezone,
-            config,
-            report_date,
-            "installs",
-            ("common", "installs", "new_installs"),
-            as_float=False,
-        )
-    if installs is None:
-        installs = apple_totals.get("installs")
-
-    paid = ads_metrics.get("paid")
-    if paid is None:
-        paid = _fetch_analytics_chart(
-            app.api_key,
-            base_url,
-            analytics_path,
-            timezone,
-            config,
-            report_date,
-            "subscriptions_new",
-            ("subscriptions", "subscriptions_new", "common"),
-            as_float=False,
-        )
+    ads_metrics = _fetch_adapty_asa_metrics(config, report_date)
+    if not ads_metrics:
+        return None
 
     return AppleAdsMetrics(
-        spend=ads_metrics.get("spend") if ads_metrics.get("spend") is not None else apple_totals.get("spend"),
-        revenue=float(revenue) if revenue is not None else None,
-        installs=int(installs) if installs is not None else None,
-        paid=int(paid) if paid is not None else None,
+        spend=float(ads_metrics["spend"]) if ads_metrics.get("spend") is not None else None,
+        revenue=float(ads_metrics["revenue"]) if ads_metrics.get("revenue") is not None else None,
+        installs=int(ads_metrics["installs"]) if ads_metrics.get("installs") is not None else None,
+        paid=int(ads_metrics["paid"]) if ads_metrics.get("paid") is not None else None,
     )
 
 
@@ -569,6 +700,8 @@ def build_apple_ads_report(report_date: Optional[date] = None) -> Optional[str]:
         report_date = date.today()
 
     metrics = fetch_apple_ads_metrics(config, report_date)
+    if metrics is None:
+        return None
     title = _escape_html(config.report_title)
     return "\n".join(
         [

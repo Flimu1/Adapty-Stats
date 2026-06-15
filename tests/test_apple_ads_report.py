@@ -51,41 +51,48 @@ class TestAppleAdsReport(unittest.TestCase):
         self.assertEqual(metrics.cpa, 10.0)
 
     @patch("apple_ads_report.get_adapty_apps")
-    @patch("apple_ads_report.get_adapty_base_url", return_value="https://api-admin.adapty.io")
-    @patch("apple_ads_report.get_adapty_analytics_path", return_value="api/v1/client-api/metrics/analytics/")
-    @patch("apple_ads_report.get_adapty_timezone", return_value="Europe/Minsk")
-    @patch("apple_ads_report._fetch_ads_manager_metrics")
+    @patch("apple_ads_report._fetch_adapty_asa_metrics")
     @patch("apple_ads_report._fetch_apple_ads_campaign_totals")
-    @patch("apple_ads_report._fetch_analytics_chart")
-    def test_fetch_apple_ads_metrics_uses_apple_api_spend_fallback(
+    def test_fetch_apple_ads_metrics_uses_only_ads_manager_values(
         self,
-        mock_analytics,
         mock_apple_totals,
-        mock_ads_manager,
-        _mock_tz,
-        _mock_path,
-        _mock_base_url,
+        mock_asa_metrics,
         mock_apps,
     ):
         from config import AppConfig
         from apple_ads_report import fetch_apple_ads_metrics
 
         mock_apps.return_value = [AppConfig(api_key="secret", name="Unfollowers")]
-        mock_ads_manager.return_value = {
-            "spend": None,
-            "revenue": None,
-            "installs": None,
-            "paid": None,
-        }
+        mock_asa_metrics.return_value = {"spend": 1.17, "revenue": 0.0, "installs": 0, "paid": 0}
         mock_apple_totals.return_value = {"spend": 120.0, "installs": 240.0}
-        mock_analytics.side_effect = [180.0, 240.0, 12.0]
 
         metrics = fetch_apple_ads_metrics(_enabled_config(), date(2026, 6, 4))
 
-        self.assertEqual(metrics.spend, 120.0)
-        self.assertEqual(metrics.revenue, 180.0)
-        self.assertEqual(metrics.installs, 240)
-        self.assertEqual(metrics.paid, 12)
+        self.assertEqual(metrics.spend, 1.17)
+        self.assertEqual(metrics.revenue, 0.0)
+        self.assertEqual(metrics.installs, 0)
+        self.assertEqual(metrics.paid, 0)
+        mock_apple_totals.assert_not_called()
+
+    @patch("apple_ads_report.get_adapty_apps")
+    @patch("apple_ads_report._fetch_adapty_asa_metrics", return_value=None)
+    @patch("apple_ads_report._fetch_apple_ads_campaign_totals")
+    def test_fetch_apple_ads_metrics_returns_none_when_ads_manager_is_unavailable(
+        self,
+        mock_apple_totals,
+        _mock_asa_metrics,
+        mock_apps,
+    ):
+        from config import AppConfig
+        from apple_ads_report import fetch_apple_ads_metrics
+
+        mock_apps.return_value = [AppConfig(api_key="secret", name="Unfollowers")]
+        mock_apple_totals.return_value = {"spend": 1.17, "installs": 0}
+
+        metrics = fetch_apple_ads_metrics(_enabled_config(), date(2026, 6, 4))
+
+        self.assertIsNone(metrics)
+        mock_apple_totals.assert_not_called()
 
     @patch("apple_ads_report.fetch_apple_ads_metrics")
     @patch("apple_ads_report.get_apple_ads_report_config")
@@ -106,23 +113,49 @@ class TestAppleAdsReport(unittest.TestCase):
 
     @patch("apple_ads_report.fetch_apple_ads_metrics")
     @patch("apple_ads_report.get_apple_ads_report_config", side_effect=_enabled_config)
-    def test_build_apple_ads_report_handles_missing_data(self, _mock_config, mock_fetch):
+    def test_build_apple_ads_report_returns_none_when_metrics_unavailable(self, _mock_config, mock_fetch):
+        from apple_ads_report import build_apple_ads_report
+
+        mock_fetch.return_value = None
+
+        self.assertIsNone(build_apple_ads_report(report_date=date(2026, 6, 4)))
+
+    @patch("apple_ads_report.fetch_apple_ads_metrics")
+    @patch("apple_ads_report.get_apple_ads_report_config", side_effect=_enabled_config)
+    def test_build_apple_ads_report_formats_zero_ads_values(self, _mock_config, mock_fetch):
         from apple_ads_report import AppleAdsMetrics, build_apple_ads_report
 
         mock_fetch.return_value = AppleAdsMetrics(
-            spend=None,
-            revenue=180.0,
-            installs=None,
+            spend=1.17,
+            revenue=0.0,
+            installs=0,
             paid=0,
         )
 
-        text = build_apple_ads_report(report_date=date(2026, 6, 4))
+        text = build_apple_ads_report(report_date=date(2026, 6, 15))
 
         self.assertEqual(
             text,
             "📣 Apple Ads — Unfollowers\n"
-            "Spend $N/A | Revenue $180 | ROAS N/A\n"
-            "Installs N/A | Paid 0 | CPI N/A | CPA N/A",
+            "Spend $1.17 | Revenue $0 | ROAS 0%\n"
+            "Installs 0 | Paid 0 | CPI $0 | CPA $0",
+        )
+
+    def test_extracts_adapty_asa_overview_payload(self):
+        from apple_ads_report import _extract_asa_metrics
+
+        payload = {
+            "data": {
+                "performanceSpend": {"total": {"amount": 1.17, "currency": "USD"}},
+                "conversionsRevenue": {"total": {"amount": 0, "currency": "USD"}},
+                "conversionsInstalls": {"total": 0},
+                "conversionsPaid": {"total": 0},
+            }
+        }
+
+        self.assertEqual(
+            _extract_asa_metrics(payload),
+            {"spend": 1.17, "revenue": 0.0, "installs": 0.0, "paid": 0.0},
         )
 
 
