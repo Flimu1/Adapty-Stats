@@ -165,7 +165,7 @@ def _metric_scalar(value: Any) -> Optional[float]:
         return direct
 
     if isinstance(value, dict):
-        for key in ("amount", "value", "total", "common"):
+        for key in ("amount", "value", "total", "common", "gross", "proceeds", "net"):
             if key in value:
                 nested = _metric_scalar(value.get(key))
                 if nested is not None:

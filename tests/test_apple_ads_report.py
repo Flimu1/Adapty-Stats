@@ -158,6 +158,23 @@ class TestAppleAdsReport(unittest.TestCase):
             {"spend": 1.17, "revenue": 0.0, "installs": 0.0, "paid": 0.0},
         )
 
+    def test_extracts_real_adapty_asa_nested_payload(self):
+        from apple_ads_report import _extract_asa_metrics
+
+        payload = {
+            "data": {
+                "local_spend": {"common": {"value": "1.1667"}},
+                "revenue": {"gross": {"total": {"value": "0"}}},
+                "adapty_installs": {"common": {"value": "0"}},
+                "paid": {"common": {"value": "0"}},
+            }
+        }
+
+        self.assertEqual(
+            _extract_asa_metrics(payload),
+            {"spend": 1.1667, "revenue": 0.0, "installs": 0.0, "paid": 0.0},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
