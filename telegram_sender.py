@@ -52,17 +52,20 @@ def send_message(text: str, parse_mode: str = "HTML", chat_id: Optional[str] = N
 
 def test_send() -> bool:
     """
-    Ручная отправка тестового отчёта (без запроса к Adapty).
+    Ручная отправка тестового отчёта в целевую группу.
     Можно вызывать из main при аргументе командной строки или по необходимости.
     """
-    text = build_report_text_for_test()
+    from report_builder import build_report
+    from report_delivery import send_followup_reports
+
+    report = build_report()
+    text = report.text
     if not text:
         text = "📊 Тестовый отчёт\n\nДанные не получены. Проверьте логи и настройки Adapty."
-    admin_id = get_telegram_admin_id()
-    if admin_id:
-        return send_message(text, chat_id=admin_id)
-    logger.error("TELEGRAM_ADMIN_ID is not set; test_send will not send to group chat")
-    return False
+    if not send_message(text):
+        return False
+    send_followup_reports(report.report_date)
+    return True
 
 
 def build_report_text_for_test() -> str:

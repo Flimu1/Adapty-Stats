@@ -95,6 +95,9 @@ def _collect_and_send(chat_id: str, to_group: bool = False) -> tuple[bool, str]:
         if not text:
             text = "📊 Данные не получены. Проверьте логи и настройки Adapty."
         if send_message(text):
+            from report_delivery import send_followup_reports
+
+            send_followup_reports(report.report_date)
             has_anomalies = bool(report.anomalies)
             sent_to_admin = False
             if has_anomalies:

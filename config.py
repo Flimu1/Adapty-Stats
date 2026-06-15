@@ -154,6 +154,83 @@ def get_ab_test_variant_value(variant: str, field: str) -> str:
     return os.getenv(key, "").strip()
 
 
+def is_apple_ads_report_enabled() -> bool:
+    """Включён ли отдельный Telegram-отчёт по Apple Ads."""
+    raw = os.getenv("APPLE_ADS_REPORT_ENABLED", "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def get_apple_ads_app_index() -> int:
+    """Номер приложения из ADAPTY_API_KEY_APP{N}, для которого строить Apple Ads отчёт."""
+    raw = os.getenv("APPLE_ADS_APP_INDEX", "1").strip()
+    try:
+        idx = int(raw)
+    except ValueError:
+        raise ValueError("APPLE_ADS_APP_INDEX должен быть целым числом")
+    if idx < 1:
+        raise ValueError("APPLE_ADS_APP_INDEX должен быть >= 1")
+    return idx
+
+
+def get_apple_ads_report_title() -> str:
+    return os.getenv("APPLE_ADS_REPORT_TITLE", "Unfollowers").strip() or "Unfollowers"
+
+
+def get_apple_ads_start_date() -> str:
+    return os.getenv("APPLE_ADS_START_DATE", "").strip()
+
+
+def get_apple_ads_attribution_source() -> str:
+    return os.getenv("APPLE_ADS_ATTRIBUTION_SOURCE", "apple_search_ads").strip()
+
+
+def get_apple_ads_metrics_paths() -> list[str]:
+    """
+    Возможные пути к Adapty Ads Manager metrics endpoint.
+    Публичный Analytics Export API документирует attribution-фильтры, но spend
+    живёт в Apple Ads Manager, поэтому путь оставлен настраиваемым.
+    """
+    raw = os.getenv("APPLE_ADS_METRICS_PATH", "").strip()
+    if raw:
+        return [p.strip().lstrip("/") for p in raw.split(",") if p.strip()]
+    return [
+        "api/v1/client-api/ads-manager/metrics/analytics/",
+        "api/v1/client-api/apple-ads/metrics/analytics/",
+    ]
+
+
+def get_apple_ads_api_base_url() -> str:
+    return os.getenv(
+        "APPLE_ADS_API_BASE_URL",
+        "https://api.searchads.apple.com/api/v5",
+    ).rstrip("/")
+
+
+def get_apple_ads_client_id() -> str:
+    return os.getenv("APPLE_ADS_CLIENT_ID", "").strip()
+
+
+def get_apple_ads_team_id() -> str:
+    return os.getenv("APPLE_ADS_TEAM_ID", "").strip()
+
+
+def get_apple_ads_key_id() -> str:
+    return os.getenv("APPLE_ADS_KEY_ID", "").strip()
+
+
+def get_apple_ads_private_key() -> str:
+    return os.getenv("APPLE_ADS_PRIVATE_KEY", "").strip().replace("\\n", "\n")
+
+
+def get_apple_ads_org_id() -> str:
+    return os.getenv("APPLE_ADS_ORG_ID", "").strip()
+
+
+def get_apple_ads_adam_id() -> str:
+    """Опциональный App Store app id для фильтрации Apple Ads campaign report по приложению."""
+    return os.getenv("APPLE_ADS_ADAM_ID", "").strip()
+
+
 def get_timezone() -> str:
     """
     Единая таймзона проекта: Europe/Minsk.

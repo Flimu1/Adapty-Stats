@@ -14,6 +14,25 @@ class TestConfig(unittest.TestCase):
 
         self.assertEqual(get_report_time(), "23:59")
 
+    @patch.dict("config.os.environ", {"APPLE_ADS_START_DATE": "2026-06-01"}, clear=False)
+    def test_apple_ads_start_date_is_read_from_env(self):
+        from config import get_apple_ads_start_date
+
+        self.assertEqual(get_apple_ads_start_date(), "2026-06-01")
+
+    @patch.dict("config.os.environ", {"APPLE_ADS_APP_INDEX": "2"}, clear=False)
+    def test_apple_ads_app_index_is_read_from_env(self):
+        from config import get_apple_ads_app_index
+
+        self.assertEqual(get_apple_ads_app_index(), 2)
+
+    @patch.dict("config.os.environ", {"APPLE_ADS_APP_INDEX": "0"}, clear=False)
+    def test_apple_ads_app_index_must_be_positive(self):
+        from config import get_apple_ads_app_index
+
+        with self.assertRaises(ValueError):
+            get_apple_ads_app_index()
+
 
 if __name__ == "__main__":
     unittest.main()
