@@ -202,6 +202,27 @@ class TestAppleAdsReport(unittest.TestCase):
             {"spend": 1.1667, "revenue": 0.0, "installs": 0.0, "paid": 0.0},
         )
 
+    def test_extracts_adapty_asa_net_revenue_like_dashboard(self):
+        from apple_ads_report import _extract_asa_metrics
+
+        payload = {
+            "data": {
+                "revenue": {
+                    "gross": {"total": {"value": "194.67"}},
+                    "proceeds": {"total": {"value": "165.47"}},
+                    "net": {"total": {"value": "148.76"}},
+                },
+                "local_spend": {"common": {"value": "288.80"}},
+                "adapty_installs": {"common": {"value": "983"}},
+                "paid": {"common": {"value": "21"}},
+            }
+        }
+
+        self.assertEqual(
+            _extract_asa_metrics(payload),
+            {"spend": 288.80, "revenue": 148.76, "installs": 983.0, "paid": 21.0},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

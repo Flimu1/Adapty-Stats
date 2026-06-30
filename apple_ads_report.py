@@ -287,6 +287,27 @@ def _post_asa_json(
     return data if isinstance(data, dict) else None
 
 
+def _extract_asa_revenue(data: Optional[dict[str, Any]]) -> Optional[float]:
+    data_obj = data.get("data") if isinstance(data, dict) else None
+    revenue = data_obj.get("revenue") if isinstance(data_obj, dict) else None
+    if isinstance(revenue, dict):
+        for basis in ("net", "proceeds", "gross"):
+            value = _metric_scalar(revenue.get(basis))
+            if value is not None:
+                return value
+    return _extract_metric(
+        data,
+        (
+            "conversionsRevenue",
+            "conversions_revenue",
+            "grossRevenue",
+            "gross_revenue",
+            "revenue",
+        ),
+        as_float=True,
+    )
+
+
 def _extract_asa_metrics(data: Optional[dict[str, Any]]) -> dict[str, Optional[float]]:
     return {
         "spend": _extract_metric(
@@ -302,17 +323,7 @@ def _extract_asa_metrics(data: Optional[dict[str, Any]]) -> dict[str, Optional[f
             ),
             as_float=True,
         ),
-        "revenue": _extract_metric(
-            data,
-            (
-                "conversionsRevenue",
-                "conversions_revenue",
-                "grossRevenue",
-                "gross_revenue",
-                "revenue",
-            ),
-            as_float=True,
-        ),
+        "revenue": _extract_asa_revenue(data),
         "installs": _extract_metric(
             data,
             (
