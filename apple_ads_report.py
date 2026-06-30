@@ -651,7 +651,23 @@ def fetch_apple_ads_metrics(
 
     ads_metrics = _fetch_adapty_asa_metrics(config, report_date)
     if not ads_metrics:
-        return None
+        apple_totals = _fetch_apple_ads_campaign_totals(config, report_date)
+        if not any(value is not None for value in apple_totals.values()):
+            return None
+        return AppleAdsMetrics(
+            spend=(
+                float(apple_totals["spend"])
+                if apple_totals.get("spend") is not None
+                else None
+            ),
+            revenue=None,
+            installs=(
+                int(apple_totals["installs"])
+                if apple_totals.get("installs") is not None
+                else None
+            ),
+            paid=None,
+        )
 
     return AppleAdsMetrics(
         spend=float(ads_metrics["spend"]) if ads_metrics.get("spend") is not None else None,
@@ -699,10 +715,15 @@ def build_apple_ads_report(report_date: Optional[date] = None) -> Optional[str]:
     if report_date is None:
         report_date = date.today()
 
+    title = _escape_html(config.report_title)
     metrics = fetch_apple_ads_metrics(config, report_date)
     if metrics is None:
-        return None
-    title = _escape_html(config.report_title)
+        return "\n".join(
+            [
+                f"📣 Apple Ads — {title}",
+                "Data unavailable. Check Adapty ASA / Apple Ads credentials in logs.",
+            ]
+        )
     return "\n".join(
         [
             f"📣 Apple Ads — {title}",

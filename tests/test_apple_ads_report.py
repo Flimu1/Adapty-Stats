@@ -77,7 +77,7 @@ class TestAppleAdsReport(unittest.TestCase):
     @patch("apple_ads_report.get_adapty_apps")
     @patch("apple_ads_report._fetch_adapty_asa_metrics", return_value=None)
     @patch("apple_ads_report._fetch_apple_ads_campaign_totals")
-    def test_fetch_apple_ads_metrics_returns_none_when_ads_manager_is_unavailable(
+    def test_fetch_apple_ads_metrics_returns_none_when_all_sources_are_unavailable(
         self,
         mock_apple_totals,
         _mock_asa_metrics,
@@ -87,12 +87,35 @@ class TestAppleAdsReport(unittest.TestCase):
         from apple_ads_report import fetch_apple_ads_metrics
 
         mock_apps.return_value = [AppConfig(api_key="secret", name="Unfollowers")]
-        mock_apple_totals.return_value = {"spend": 1.17, "installs": 0}
+        mock_apple_totals.return_value = {"spend": None, "installs": None}
 
         metrics = fetch_apple_ads_metrics(_enabled_config(), date(2026, 6, 4))
 
         self.assertIsNone(metrics)
-        mock_apple_totals.assert_not_called()
+        mock_apple_totals.assert_called_once()
+
+    @patch("apple_ads_report.get_adapty_apps")
+    @patch("apple_ads_report._fetch_adapty_asa_metrics", return_value=None)
+    @patch("apple_ads_report._fetch_apple_ads_campaign_totals")
+    def test_fetch_apple_ads_metrics_uses_apple_ads_fallback_when_asa_is_unavailable(
+        self,
+        mock_apple_totals,
+        _mock_asa_metrics,
+        mock_apps,
+    ):
+        from config import AppConfig
+        from apple_ads_report import fetch_apple_ads_metrics
+
+        mock_apps.return_value = [AppConfig(api_key="secret", name="Unfollowers")]
+        mock_apple_totals.return_value = {"spend": 120.0, "installs": 240.0}
+
+        metrics = fetch_apple_ads_metrics(_enabled_config(), date(2026, 6, 4))
+
+        self.assertIsNotNone(metrics)
+        self.assertEqual(metrics.spend, 120.0)
+        self.assertIsNone(metrics.revenue)
+        self.assertEqual(metrics.installs, 240)
+        self.assertIsNone(metrics.paid)
 
     @patch("apple_ads_report.fetch_apple_ads_metrics")
     @patch("apple_ads_report.get_apple_ads_report_config")
@@ -113,12 +136,16 @@ class TestAppleAdsReport(unittest.TestCase):
 
     @patch("apple_ads_report.fetch_apple_ads_metrics")
     @patch("apple_ads_report.get_apple_ads_report_config", side_effect=_enabled_config)
-    def test_build_apple_ads_report_returns_none_when_metrics_unavailable(self, _mock_config, mock_fetch):
+    def test_build_apple_ads_report_returns_diagnostic_when_metrics_unavailable(self, _mock_config, mock_fetch):
         from apple_ads_report import build_apple_ads_report
 
         mock_fetch.return_value = None
 
-        self.assertIsNone(build_apple_ads_report(report_date=date(2026, 6, 4)))
+        self.assertEqual(
+            build_apple_ads_report(report_date=date(2026, 6, 4)),
+            "📣 Apple Ads — Unfollowers\n"
+            "Data unavailable. Check Adapty ASA / Apple Ads credentials in logs.",
+        )
 
     @patch("apple_ads_report.fetch_apple_ads_metrics")
     @patch("apple_ads_report.get_apple_ads_report_config", side_effect=_enabled_config)
