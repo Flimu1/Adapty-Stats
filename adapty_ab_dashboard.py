@@ -92,18 +92,6 @@ def _number(data: Mapping[str, Any], context: str, *names: str) -> float:
         raise AdaptyDashboardError(f"Adapty dashboard response is missing {context}")
 
 
-def _optional_number(data: Mapping[str, Any], *names: str) -> Optional[float]:
-    value = _alias(data, *names)
-    if isinstance(value, Mapping):
-        value = _alias(value, "value", "total")
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _normalized_name(value: str) -> str:
     return " ".join(value.split())
 
@@ -288,22 +276,30 @@ class AdaptyAbDashboardClient:
                     purchases=int(
                         _number(metric, f"variant {label} purchases", "purchases")
                     ),
-                    revenue_per_1000=_optional_number(
+                    revenue_per_1000=_number(
                         metric,
+                        f"variant {label} revenue per 1K users",
                         "average_per_1000",
                         "averagePer1000",
                         "revenue_per_1000",
                         "revenuePer1000",
                     ),
-                    proceeds=_optional_number(metric, "proceeds"),
-                    net_revenue=_optional_number(
+                    proceeds=_number(metric, f"variant {label} proceeds", "proceeds"),
+                    net_revenue=_number(
                         metric,
+                        f"variant {label} net proceeds",
                         "net_revenue",
                         "netRevenue",
                         "net_proceeds",
                         "netProceeds",
                     ),
-                    probability=_optional_number(metric, "probability"),
+                    probability=_number(
+                        metric,
+                        f"variant {label} probability to be best",
+                        "probability",
+                        "probability_to_be_best",
+                        "probabilityToBeBest",
+                    ),
                 )
             )
 

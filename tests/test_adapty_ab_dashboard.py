@@ -185,6 +185,25 @@ class TestAdaptyAbDashboardClient(unittest.TestCase):
                 },
             )
 
+    def test_fails_closed_when_displayed_dashboard_metric_is_missing(self):
+        from adapty_ab_dashboard import AdaptyDashboardError
+
+        payload = _metrics_payload()
+        del payload["data"][0]["items"][0]["proceeds"]
+        client, _session = self._client(
+            [_response(_metadata_payload()), _response(payload)]
+        )
+
+        with self.assertRaisesRegex(AdaptyDashboardError, "proceeds"):
+            client.fetch_metrics(
+                TEST_ID,
+                "Test paywall prices. 4.99/29.99 vs 5.99/39.99",
+                {
+                    "A": (NEW_PAYWALL_ID, "New Paywall New Prices"),
+                    "B": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                },
+            )
+
     def test_fails_closed_on_invalid_json(self):
         from adapty_ab_dashboard import AdaptyDashboardError
 
