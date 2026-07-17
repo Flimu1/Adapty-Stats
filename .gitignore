@@ -28,3 +28,7 @@ logs/
 
 # Runtime settings (report time override)
 data/
+
+# Codex local tooling
+.worktrees/
+.playwright-cli/
