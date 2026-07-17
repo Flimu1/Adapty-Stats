@@ -13,8 +13,8 @@ def _enabled_config():
         app_name="Unfollowers: Follow & Unfollow",
         test_name="Test paywall prices. 4.99/29.99 vs 5.99/39.99",
         start_date=date(2026, 7, 10),
-        variant_a=AbTestVariantConfig("A", "new-paywall", "New Paywall New Prices"),
-        variant_b=AbTestVariantConfig("B", "old-paywall", "New Paywall Old Prices"),
+        variant_a=AbTestVariantConfig("A", "old-paywall", "New Paywall Old Prices"),
+        variant_b=AbTestVariantConfig("B", "new-paywall", "New Paywall New Prices"),
         test_id="test-123",
         dashboard_app_id="app-456",
         dashboard_token="Bearer dashboard-secret",
@@ -28,18 +28,6 @@ def _snapshot():
         rows=[
             AbTestVariantMetrics(
                 label="A",
-                paywall_name="New Paywall New Prices",
-                revenue=163.2467,
-                paywall_views=446,
-                purchases=12,
-                arpas=8.86,
-                revenue_per_1000=291.0,
-                proceeds=139.0,
-                net_revenue=124.0,
-                probability=87.82,
-            ),
-            AbTestVariantMetrics(
-                label="B",
                 paywall_name="New Paywall Old Prices",
                 revenue=86.0,
                 paywall_views=527,
@@ -49,6 +37,18 @@ def _snapshot():
                 proceeds=73.0,
                 net_revenue=69.0,
                 probability=12.18,
+            ),
+            AbTestVariantMetrics(
+                label="B",
+                paywall_name="New Paywall New Prices",
+                revenue=163.2467,
+                paywall_views=446,
+                purchases=12,
+                arpas=8.86,
+                revenue_per_1000=291.0,
+                proceeds=139.0,
+                net_revenue=124.0,
+                probability=87.82,
             ),
         ],
         collected_at=datetime(2026, 7, 17, 12, 41, tzinfo=timezone.utc),
@@ -69,7 +69,7 @@ class TestAbTestReport(unittest.TestCase):
         self.assertIn("📱 App: Unfollowers: Follow &amp; Unfollow", text)
         self.assertIn("🔎 Source: Adapty A/B Test Details", text)
         self.assertIn("🕒 Snapshot: 17.07.2026 15:41 (Europe/Minsk)", text)
-        self.assertIn("<b>A / New Paywall New Prices</b>", text)
+        self.assertIn("<b>A / New Paywall Old Prices</b>", text)
         self.assertIn("💵 Revenue: $163.25", text)
         self.assertIn("📊 Revenue per 1K users: $291", text)
         self.assertIn("💰 Proceeds: $139", text)
@@ -79,8 +79,8 @@ class TestAbTestReport(unittest.TestCase):
         self.assertIn("📲 Paywall views: 446", text)
         self.assertIn("💳 Purchases: 12", text)
         self.assertIn("🔄 CR view→purchase: 2.69%", text)
-        self.assertIn("<b>B / New Paywall Old Prices</b>", text)
-        self.assertIn("🏆 Лидер по revenue: A (+$77.25)", text)
+        self.assertIn("<b>B / New Paywall New Prices</b>", text)
+        self.assertIn("🏆 Лидер по revenue: B (+$77.25)", text)
         self.assertIn("Views обновляются Adapty периодически", text)
 
     def test_variant_metrics_handles_zero_views_without_division_by_zero(self):
@@ -128,8 +128,8 @@ class TestAbTestReport(unittest.TestCase):
             test_id="test-123",
             test_name="Price test",
             variants=(
-                AdaptyAbVariantMetrics("A", "new-paywall", "New", 1, 2, 3, 4),
-                AdaptyAbVariantMetrics("B", "old-paywall", "Old", 5, 6, 7, 8),
+                AdaptyAbVariantMetrics("A", "old-paywall", "Old", 1, 2, 3, 4),
+                AdaptyAbVariantMetrics("B", "new-paywall", "New", 5, 6, 7, 8),
             ),
             collected_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
         )
@@ -145,8 +145,8 @@ class TestAbTestReport(unittest.TestCase):
             test_id="test-123",
             expected_test_name=config.test_name,
             expected_variants={
-                "A": ("new-paywall", "New Paywall New Prices"),
-                "B": ("old-paywall", "New Paywall Old Prices"),
+                "A": ("old-paywall", "New Paywall Old Prices"),
+                "B": ("new-paywall", "New Paywall New Prices"),
             },
         )
         self.assertEqual(result.collected_at, datetime(2026, 7, 17, tzinfo=timezone.utc))

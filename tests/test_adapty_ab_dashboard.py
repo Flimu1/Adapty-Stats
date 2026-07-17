@@ -17,15 +17,15 @@ def _metadata_payload():
             "paywalls": [
                 {
                     "paywall": {
-                        "paywall_id": NEW_PAYWALL_ID,
-                        "title": "New Paywall New Prices",
+                        "paywall_id": OLD_PAYWALL_ID,
+                        "title": "New Paywall Old Prices ",
                     },
                     "weight": 50,
                 },
                 {
                     "paywall": {
-                        "paywall_id": OLD_PAYWALL_ID,
-                        "title": "New Paywall Old Prices ",
+                        "paywall_id": NEW_PAYWALL_ID,
+                        "title": "New Paywall New Prices",
                     },
                     "weight": 50,
                 },
@@ -113,18 +113,18 @@ class TestAdaptyAbDashboardClient(unittest.TestCase):
             test_id=TEST_ID,
             expected_test_name="Test paywall prices. 4.99/29.99 vs 5.99/39.99",
             expected_variants={
-                "A": (NEW_PAYWALL_ID, "New Paywall New Prices"),
-                "B": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                "A": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                "B": (NEW_PAYWALL_ID, "New Paywall New Prices"),
             },
         )
 
         self.assertEqual(result.test_id, TEST_ID)
         self.assertEqual([item.label for item in result.variants], ["A", "B"])
-        self.assertEqual(result.variants[0].paywall_id, NEW_PAYWALL_ID)
-        self.assertAlmostEqual(result.variants[0].revenue, 163.2467)
-        self.assertEqual(result.variants[0].views, 446)
-        self.assertEqual(result.variants[0].purchases, 12)
-        self.assertAlmostEqual(result.variants[1].revenue, 86.0)
+        self.assertEqual(result.variants[0].paywall_id, OLD_PAYWALL_ID)
+        self.assertAlmostEqual(result.variants[0].revenue, 86.0)
+        self.assertEqual(result.variants[0].views, 527)
+        self.assertEqual(result.variants[0].purchases, 8)
+        self.assertAlmostEqual(result.variants[1].revenue, 163.2467)
 
         metadata_call, metrics_call = session.get.call_args_list
         self.assertEqual(
@@ -161,8 +161,8 @@ class TestAdaptyAbDashboardClient(unittest.TestCase):
                 TEST_ID,
                 "Test paywall prices. 4.99/29.99 vs 5.99/39.99",
                 {
-                    "A": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
-                    "B": (NEW_PAYWALL_ID, "New Paywall New Prices"),
+                    "A": (NEW_PAYWALL_ID, "New Paywall New Prices"),
+                    "B": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
                 },
             )
 
@@ -180,8 +180,8 @@ class TestAdaptyAbDashboardClient(unittest.TestCase):
                 TEST_ID,
                 "Test paywall prices. 4.99/29.99 vs 5.99/39.99",
                 {
-                    "A": (NEW_PAYWALL_ID, "New Paywall New Prices"),
-                    "B": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                    "A": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                    "B": (NEW_PAYWALL_ID, "New Paywall New Prices"),
                 },
             )
 
@@ -199,8 +199,8 @@ class TestAdaptyAbDashboardClient(unittest.TestCase):
                 TEST_ID,
                 "Test paywall prices. 4.99/29.99 vs 5.99/39.99",
                 {
-                    "A": (NEW_PAYWALL_ID, "New Paywall New Prices"),
-                    "B": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                    "A": (OLD_PAYWALL_ID, "New Paywall Old Prices"),
+                    "B": (NEW_PAYWALL_ID, "New Paywall New Prices"),
                 },
             )
 
