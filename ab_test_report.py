@@ -10,6 +10,7 @@ import requests
 
 from config import (
     get_ab_test_app_index,
+    get_ab_test_id,
     get_ab_test_name,
     get_ab_test_start_date,
     get_ab_test_variant_value,
@@ -18,6 +19,8 @@ from config import (
     get_adapty_base_url,
     get_adapty_cohort_path,
     get_adapty_funnel_path,
+    get_adapty_dashboard_app_id,
+    get_adapty_dashboard_token,
     get_adapty_timezone,
     is_ab_test_report_enabled,
 )
@@ -41,6 +44,9 @@ class AbTestConfig:
     start_date: date
     variant_a: AbTestVariantConfig
     variant_b: AbTestVariantConfig
+    test_id: str = ""
+    dashboard_app_id: str = ""
+    dashboard_token: str = ""
 
 
 @dataclass
@@ -112,6 +118,15 @@ def get_ab_test_config() -> AbTestConfig:
         )
 
     test_name = _required(get_ab_test_name(), "AB_TEST_NAME")
+    test_id = _required(get_ab_test_id(), "AB_TEST_ID")
+    dashboard_app_id = _required(
+        get_adapty_dashboard_app_id(),
+        "ADAPTY_DASHBOARD_APP_ID",
+    )
+    dashboard_token = _required(
+        get_adapty_dashboard_token(),
+        "ADAPTY_DASHBOARD_TOKEN",
+    )
     start_date = _parse_date(_required(get_ab_test_start_date(), "AB_TEST_START_DATE"))
 
     def variant_config(variant: str, default_label: str) -> AbTestVariantConfig:
@@ -141,6 +156,9 @@ def get_ab_test_config() -> AbTestConfig:
         start_date=start_date,
         variant_a=variant_config("A", "Variant A"),
         variant_b=variant_config("B", "Variant B"),
+        test_id=test_id,
+        dashboard_app_id=dashboard_app_id,
+        dashboard_token=dashboard_token,
     )
 
 

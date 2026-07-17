@@ -144,6 +144,11 @@ def get_ab_test_name() -> str:
     return os.getenv("AB_TEST_NAME", "").strip()
 
 
+def get_ab_test_id() -> str:
+    """Immutable Adapty dashboard ID of the A/B test."""
+    return os.getenv("AB_TEST_ID", "").strip()
+
+
 def get_ab_test_start_date() -> str:
     return os.getenv("AB_TEST_START_DATE", "").strip()
 

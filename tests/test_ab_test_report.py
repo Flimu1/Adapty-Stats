@@ -53,6 +53,30 @@ def _mock_metrics(_config, report_date):
 
 
 class TestAbTestReport(unittest.TestCase):
+    @patch("ab_test_report.get_adapty_apps")
+    @patch("ab_test_report.get_ab_test_variant_value")
+    @patch("ab_test_report.get_adapty_dashboard_token", return_value="")
+    @patch("ab_test_report.get_adapty_dashboard_app_id", return_value="app-456")
+    @patch("ab_test_report.get_ab_test_id", return_value="test-123")
+    @patch("ab_test_report.get_ab_test_start_date", return_value="2026-07-10")
+    @patch("ab_test_report.get_ab_test_name", return_value="Price test")
+    @patch("ab_test_report.is_ab_test_report_enabled", return_value=True)
+    def test_enabled_config_requires_dashboard_token(
+        self,
+        _mock_enabled,
+        _mock_name,
+        _mock_start,
+        _mock_test_id,
+        _mock_app_id,
+        _mock_token,
+        _mock_variant,
+        _mock_apps,
+    ):
+        from ab_test_report import get_ab_test_config
+
+        with self.assertRaisesRegex(ValueError, "ADAPTY_DASHBOARD_TOKEN"):
+            get_ab_test_config()
+
     @patch("ab_test_report.fetch_ab_test_metrics", side_effect=_mock_metrics)
     @patch("ab_test_report.get_ab_test_config", side_effect=_mock_enabled_config)
     def test_build_ab_test_report_formats_variants_and_leader(self, _mock_config, _mock_fetch):
