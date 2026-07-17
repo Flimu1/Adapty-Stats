@@ -1,5 +1,8 @@
 # Adapty A/B Report Reliability Design
 
+> **Superseded:** This Dashboard-token design is historical. The active design is
+> [Stable Adapty A/B Report via Secret API](2026-07-17-adapty-ab-secret-api-report-design.md).
+
 **Date:** 2026-07-17
 
 ## Goal

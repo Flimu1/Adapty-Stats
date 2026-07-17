@@ -2,6 +2,7 @@
 import io
 import logging
 import unittest
+from unittest.mock import patch
 
 
 class TestSecretRedactionFilter(unittest.TestCase):
@@ -62,6 +63,46 @@ class TestSecretRedactionFilter(unittest.TestCase):
             )
         finally:
             root.handlers = original_handlers
+
+    @patch.dict(
+        "safe_logging.os.environ",
+        {
+            "ADAPTY_API_KEY_APP1": "first-adapty-secret",
+            "ADAPTY_API_KEY_APP23": "second-adapty-secret",
+        },
+        clear=False,
+    )
+    def test_configure_defaults_redact_every_numbered_adapty_key_in_args_and_traceback(
+        self,
+    ):
+        from safe_logging import configure_secret_redaction
+
+        root = logging.getLogger()
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        original_handlers = root.handlers[:]
+        original_level = root.level
+        try:
+            root.handlers = [handler]
+            root.setLevel(logging.DEBUG)
+            configure_secret_redaction()
+            logger = logging.getLogger("safe-logging-default-app-keys")
+            logger.warning(
+                "keys: %s %s", "first-adapty-secret", "second-adapty-secret"
+            )
+            try:
+                raise RuntimeError("failed with first-adapty-secret and second-adapty-secret")
+            except RuntimeError:
+                logger.exception("request failed")
+        finally:
+            root.handlers = original_handlers
+            root.setLevel(original_level)
+
+        output = stream.getvalue()
+        self.assertNotIn("first-adapty-secret", output)
+        self.assertNotIn("second-adapty-secret", output)
+        self.assertGreaterEqual(output.count("[REDACTED]"), 4)
 
 
 if __name__ == "__main__":

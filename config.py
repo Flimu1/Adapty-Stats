@@ -145,7 +145,7 @@ def get_ab_test_name() -> str:
 
 
 def get_ab_test_id() -> str:
-    """Immutable Adapty dashboard ID of the A/B test."""
+    """Immutable Adapty experiment ID used to scope Secret API A/B exports."""
     return os.getenv("AB_TEST_ID", "").strip()
 
 
@@ -197,6 +197,7 @@ def get_adapty_asa_api_base_url() -> str:
 
 
 def get_adapty_dashboard_token() -> str:
+    """Dashboard credential retained for Apple Ads Manager requests only."""
     return (
         os.getenv("ADAPTY_DASHBOARD_TOKEN", "").strip()
         or os.getenv("ADAPTY_ASA_AUTH_TOKEN", "").strip()
@@ -204,10 +205,12 @@ def get_adapty_dashboard_token() -> str:
 
 
 def get_adapty_dashboard_company_id() -> str:
+    """Dashboard company identity retained for Apple Ads Manager requests only."""
     return os.getenv("ADAPTY_DASHBOARD_COMPANY_ID", "").strip()
 
 
 def get_adapty_dashboard_app_id() -> str:
+    """Dashboard app identity retained for Apple Ads Manager requests only."""
     return os.getenv("ADAPTY_DASHBOARD_APP_ID", "").strip()
 
 

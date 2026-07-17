@@ -1,5 +1,8 @@
 # Adapty A/B Report Reliability Implementation Plan
 
+> **Superseded:** This Dashboard-client plan is historical. Use the active
+> [Stable Secret API implementation plan](2026-07-17-adapty-ab-secret-api-report.md).
+
 > **Execution workflow:** Follow `superpowers:test-driven-development` for every behavior change and `superpowers:verification-before-completion` before any completion claim.
 
 **Goal:** Replace paywall-wide A/B calculations with validated experiment-scoped Adapty metrics, expose snapshot latency, prevent secret leakage, deploy the fix to Railway production, and send one verified A/B report to the configured general Telegram chat.

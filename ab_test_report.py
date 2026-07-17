@@ -1,24 +1,36 @@
-"""Build a Telegram report from experiment-scoped Adapty A/B metrics."""
+"""Build the strict Secret-Key Adapty A/B Telegram report."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional, Union
-from zoneinfo import ZoneInfo
+from typing import Optional, Sequence
 
-from adapty_ab_dashboard import AdaptyAbDashboardClient
+from adapty_ab_export import AdaptyAbExportClient, AdaptyAbVariantMetrics
 from config import (
     get_ab_test_app_index,
     get_ab_test_id,
     get_ab_test_name,
     get_ab_test_start_date,
     get_ab_test_variant_value,
+    get_adapty_analytics_path,
     get_adapty_apps,
-    get_adapty_dashboard_app_id,
-    get_adapty_dashboard_token,
+    get_adapty_base_url,
     get_adapty_timezone,
     is_ab_test_report_enabled,
 )
+
+
+APPROVED_AB_APP_INDEX = 1
+APPROVED_AB_APP_NAME = "Unfollowers: Follow & Unfollow"
+APPROVED_AB_TEST_ID = "1db6e378-026f-4634-9522-ec4fa95deb99"
+APPROVED_AB_TEST_NAME = "Test paywall prices. 4.99/29.99 vs 5.99/39.99"
+APPROVED_AB_START_DATE = date(2026, 7, 10)
+APPROVED_AB_VARIANT_A_LABEL = "A"
+APPROVED_AB_VARIANT_A_PAYWALL_ID = "d6d24875-e330-4ad9-8ee0-841d3452a911"
+APPROVED_AB_VARIANT_A_PAYWALL_NAME = "New Paywall Old Prices"
+APPROVED_AB_VARIANT_B_LABEL = "B"
+APPROVED_AB_VARIANT_B_PAYWALL_ID = "d6765d7f-eb06-42db-8d0d-ee21e2b41fe8"
+APPROVED_AB_VARIANT_B_PAYWALL_NAME = "New Paywall New Prices"
 
 
 @dataclass(frozen=True)
@@ -38,56 +50,44 @@ class AbTestConfig:
     variant_a: AbTestVariantConfig
     variant_b: AbTestVariantConfig
     test_id: str = ""
-    dashboard_app_id: str = ""
-    dashboard_token: str = ""
 
 
-@dataclass(frozen=True)
-class AbTestVariantMetrics:
-    label: str
-    paywall_name: str
-    revenue: Optional[float]
-    paywall_views: Optional[int]
-    purchases: Optional[int]
-    arpas: Optional[float] = None
-    revenue_per_1000: Optional[float] = None
-    proceeds: Optional[float] = None
-    net_revenue: Optional[float] = None
-    probability: Optional[float] = None
-
-    @property
-    def conversion_rate(self) -> Optional[float]:
-        if self.paywall_views is None or self.purchases is None or self.paywall_views <= 0:
-            return None
-        return (float(self.purchases) / float(self.paywall_views)) * 100.0
+APPROVED_AB_VARIANT_A = AbTestVariantConfig(
+    APPROVED_AB_VARIANT_A_LABEL,
+    APPROVED_AB_VARIANT_A_PAYWALL_ID,
+    APPROVED_AB_VARIANT_A_PAYWALL_NAME,
+)
+APPROVED_AB_VARIANT_B = AbTestVariantConfig(
+    APPROVED_AB_VARIANT_B_LABEL,
+    APPROVED_AB_VARIANT_B_PAYWALL_ID,
+    APPROVED_AB_VARIANT_B_PAYWALL_NAME,
+)
 
 
-@dataclass(frozen=True)
-class AbTestReportSnapshot:
-    rows: list[AbTestVariantMetrics]
-    collected_at: datetime
+def _validate_approved_ab_test_config(config: AbTestConfig) -> None:
+    """Reject enabled configs that target anything but the approved experiment."""
+    if not config.enabled:
+        return
+    if (
+        config.app_index != APPROVED_AB_APP_INDEX
+        or config.app_name != APPROVED_AB_APP_NAME
+        or config.test_id != APPROVED_AB_TEST_ID
+        or config.test_name != APPROVED_AB_TEST_NAME
+        or config.start_date != APPROVED_AB_START_DATE
+        or config.variant_a != APPROVED_AB_VARIANT_A
+        or config.variant_b != APPROVED_AB_VARIANT_B
+    ):
+        raise ValueError(
+            "A/B report configuration does not match the approved production experiment"
+        )
 
 
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _fmt_num(n: Union[float, int, None]) -> str:
-    if n is None:
-        return "N/A"
-    if isinstance(n, float):
-        if n == int(n):
-            return f"{int(n):,}"
-        return f"{n:,.2f}"
-    return f"{int(n):,}"
-
-
-def _fmt_money(n: Optional[float]) -> str:
-    return "$N/A" if n is None else f"${_fmt_num(float(n))}"
-
-
-def _fmt_rate(n: Optional[float]) -> str:
-    return "N/A" if n is None else f"{n:.2f}%"
+def _fmt_money(value: float) -> str:
+    return f"${value:.2f}"
 
 
 def _parse_date(raw: str) -> date:
@@ -108,33 +108,24 @@ def get_ab_test_config() -> AbTestConfig:
         empty = AbTestVariantConfig("", "", "")
         return AbTestConfig(False, 1, "", "", date.today(), empty, empty)
 
-    test_name = _required(get_ab_test_name(), "AB_TEST_NAME")
-    test_id = _required(get_ab_test_id(), "AB_TEST_ID")
-    dashboard_app_id = _required(
-        get_adapty_dashboard_app_id(),
-        "ADAPTY_DASHBOARD_APP_ID",
-    )
-    dashboard_token = _required(
-        get_adapty_dashboard_token(),
-        "ADAPTY_DASHBOARD_TOKEN",
-    )
-    start_date = _parse_date(_required(get_ab_test_start_date(), "AB_TEST_START_DATE"))
-
     def variant_config(variant: str) -> AbTestVariantConfig:
-        label = get_ab_test_variant_value(variant, "LABEL") or variant
+        label = _required(
+            get_ab_test_variant_value(variant, "LABEL"),
+            f"AB_TEST_VARIANT_{variant}_LABEL",
+        )
         if label != variant:
-            raise ValueError(
-                f"AB_TEST_VARIANT_{variant}_LABEL должен быть равен {variant}"
-            )
-        paywall_id = _required(
-            get_ab_test_variant_value(variant, "PAYWALL_ID"),
-            f"AB_TEST_VARIANT_{variant}_PAYWALL_ID",
+            raise ValueError(f"AB_TEST_VARIANT_{variant}_LABEL должен быть равен {variant}")
+        return AbTestVariantConfig(
+            label=label,
+            paywall_id=_required(
+                get_ab_test_variant_value(variant, "PAYWALL_ID"),
+                f"AB_TEST_VARIANT_{variant}_PAYWALL_ID",
+            ),
+            paywall_name=_required(
+                get_ab_test_variant_value(variant, "PAYWALL_NAME"),
+                f"AB_TEST_VARIANT_{variant}_PAYWALL_NAME",
+            ),
         )
-        paywall_name = _required(
-            get_ab_test_variant_value(variant, "PAYWALL_NAME"),
-            f"AB_TEST_VARIANT_{variant}_PAYWALL_NAME",
-        )
-        return AbTestVariantConfig(label, paywall_id, paywall_name)
 
     app_index = get_ab_test_app_index()
     apps = get_adapty_apps()
@@ -142,108 +133,109 @@ def get_ab_test_config() -> AbTestConfig:
         raise ValueError(
             f"AB_TEST_APP_INDEX={app_index} не найден: настроено приложений {len(apps)}"
         )
+    app = apps[app_index - 1]
+    if not app.api_key.strip():
+        raise ValueError("Selected Adapty Secret API Key is required")
 
-    return AbTestConfig(
+    variant_a = variant_config("A")
+    variant_b = variant_config("B")
+    if variant_a.paywall_id == variant_b.paywall_id:
+        raise ValueError("A/B variants must use different paywall IDs")
+
+    config = AbTestConfig(
         enabled=True,
         app_index=app_index,
-        app_name=apps[app_index - 1].name,
-        test_name=test_name,
-        start_date=start_date,
-        variant_a=variant_config("A"),
-        variant_b=variant_config("B"),
-        test_id=test_id,
-        dashboard_app_id=dashboard_app_id,
-        dashboard_token=dashboard_token,
+        app_name=app.name,
+        test_name=_required(get_ab_test_name(), "AB_TEST_NAME"),
+        start_date=_parse_date(_required(get_ab_test_start_date(), "AB_TEST_START_DATE")),
+        variant_a=variant_a,
+        variant_b=variant_b,
+        test_id=_required(get_ab_test_id(), "AB_TEST_ID"),
     )
+    _validate_approved_ab_test_config(config)
+    return config
 
 
 def fetch_ab_test_metrics(
     config: AbTestConfig,
     report_date: date,
-) -> AbTestReportSnapshot:
-    """Fetch one atomic, validated dashboard snapshot.
+) -> list[AdaptyAbVariantMetrics]:
+    """Collect exactly the configured A then B variants through the Secret API."""
+    _validate_approved_ab_test_config(config)
+    if report_date < config.start_date:
+        raise ValueError("A/B report date cannot precede AB_TEST_START_DATE")
+    apps = get_adapty_apps()
+    if config.app_index < 1 or config.app_index > len(apps):
+        raise ValueError("Selected Adapty app is not configured")
+    app = apps[config.app_index - 1]
+    if not app.api_key.strip():
+        raise ValueError("Selected Adapty Secret API Key is required")
 
-    ``report_date`` is retained for the scheduler interface; the Adapty A/B
-    endpoint returns the test-to-date snapshot shown on the dashboard.
-    """
-    del report_date
-    client = AdaptyAbDashboardClient(
-        app_id=config.dashboard_app_id,
-        token=config.dashboard_token,
-    )
-    result = client.fetch_metrics(
-        test_id=config.test_id,
-        expected_test_name=config.test_name,
-        expected_variants={
-            "A": (config.variant_a.paywall_id, config.variant_a.paywall_name),
-            "B": (config.variant_b.paywall_id, config.variant_b.paywall_name),
-        },
+    client = AdaptyAbExportClient(
+        api_key=app.api_key,
+        base_url=get_adapty_base_url(),
+        analytics_path=get_adapty_analytics_path(),
+        timezone=get_adapty_timezone(),
     )
     rows = [
-        AbTestVariantMetrics(
-            label=item.label,
-            paywall_name=item.paywall_name,
-            revenue=item.revenue,
-            paywall_views=item.views,
-            purchases=item.purchases,
-            arpas=item.arpas,
-            revenue_per_1000=item.revenue_per_1000,
-            proceeds=item.proceeds,
-            net_revenue=item.net_revenue,
-            probability=item.probability,
+        client.fetch_variant(
+            label=variant.label,
+            paywall_id=variant.paywall_id,
+            test_id=config.test_id,
+            start_date=config.start_date,
+            end_date=report_date,
         )
-        for item in result.variants
+        for variant in (config.variant_a, config.variant_b)
     ]
-    return AbTestReportSnapshot(rows=rows, collected_at=result.collected_at)
+    _validated_export_rows(rows, config)
+    return rows
 
 
-def _leader_line(rows: list[AbTestVariantMetrics]) -> str:
-    if len(rows) != 2 or rows[0].revenue is None or rows[1].revenue is None:
-        return "🏆 Лидер по revenue: N/A"
+def _validated_export_rows(
+    rows: Sequence[AdaptyAbVariantMetrics], config: AbTestConfig
+) -> None:
+    expected = (config.variant_a, config.variant_b)
+    if len(rows) != 2:
+        raise ValueError("A/B report requires exactly two complete rows")
+    if [row.label for row in rows] != ["A", "B"]:
+        raise ValueError("A/B Export rows must be ordered A then B")
+    if [row.paywall_id for row in rows] != [variant.paywall_id for variant in expected]:
+        raise ValueError("A/B Export rows do not match configured paywall IDs")
+    if len({row.paywall_id for row in rows}) != 2:
+        raise ValueError("A/B Export rows must have different paywall IDs")
+
+
+def _leader_line(rows: Sequence[AdaptyAbVariantMetrics]) -> str:
     first, second = rows
-    if float(first.revenue) == float(second.revenue):
-        return "🤝 Revenue equal"
-    leader, runner_up = (first, second) if first.revenue > second.revenue else (second, first)
-    delta = float(leader.revenue) - float(runner_up.revenue)
-    return f"🏆 Лидер по revenue: {_escape_html(leader.label)} (+${_fmt_num(delta)})"
+    leader, runner_up = (first, second) if first.revenue >= second.revenue else (second, first)
+    return f"🏆 Лидер по revenue: {leader.label} (+{_fmt_money(leader.revenue - runner_up.revenue)})"
 
 
 def build_ab_test_report(report_date: Optional[date] = None) -> Optional[str]:
     config = get_ab_test_config()
     if not config.enabled:
         return None
-    effective_date = report_date or date.today()
-    snapshot = fetch_ab_test_metrics(config, effective_date)
-    timezone_name = get_adapty_timezone()
-    collected_at = snapshot.collected_at.astimezone(ZoneInfo(timezone_name))
-
+    _validate_approved_ab_test_config(config)
+    rows = fetch_ab_test_metrics(config, report_date or date.today())
+    _validated_export_rows(rows, config)
     lines = [
         f"🧪 A/B Test: {_escape_html(config.test_name)}",
         f"📱 App: {_escape_html(config.app_name)}",
-        "🔎 Source: Adapty A/B Test Details",
-        f"🕒 Snapshot: {collected_at.strftime('%d.%m.%Y %H:%M')} ({_escape_html(timezone_name)})",
         "",
     ]
-    for row in snapshot.rows:
+    for icon, row, variant in zip(
+        ("🅰️", "🅱️"), rows, (config.variant_a, config.variant_b), strict=True
+    ):
         lines.extend(
             [
-                f"<b>{_escape_html(row.label)} / {_escape_html(row.paywall_name)}</b>",
+                f"{icon} <b>{_escape_html(row.label)} / {_escape_html(variant.paywall_name)}</b>",
                 f"💵 Revenue: {_fmt_money(row.revenue)}",
-                f"📊 Revenue per 1K users: {_fmt_money(row.revenue_per_1000)}",
-                f"💰 Proceeds: {_fmt_money(row.proceeds)}",
-                f"🏦 Net proceeds: {_fmt_money(row.net_revenue)}",
-                f"🎯 P2BB: {_fmt_rate(row.probability)}",
                 f"📈 ARPAS: {_fmt_money(row.arpas)}",
-                f"📲 Paywall views: {_fmt_num(row.paywall_views)}",
-                f"💳 Purchases: {_fmt_num(row.purchases)}",
-                f"🔄 CR view→purchase: {_fmt_rate(row.conversion_rate)}",
+                f"👥 Unique paywall views: {row.unique_views:,}",
+                f"💳 Purchases: {row.purchases:,}",
+                f"🔄 CR unique view→purchase: {row.conversion_rate:.2f}%",
                 "",
             ]
         )
-    lines.extend(
-        [
-            _leader_line(snapshot.rows),
-            "ℹ️ Views обновляются Adapty периодически и могут отставать от revenue/purchases.",
-        ]
-    )
+    lines.append(_leader_line(rows))
     return "\n".join(lines).strip()

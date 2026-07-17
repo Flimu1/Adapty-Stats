@@ -9,22 +9,25 @@ class TestConfig(unittest.TestCase):
     @patch.dict(
         "config.os.environ",
         {
-            "AB_TEST_ID": "test-123",
             "ADAPTY_DASHBOARD_APP_ID": "app-456",
             "ADAPTY_DASHBOARD_TOKEN": "Bearer dashboard-secret",
         },
         clear=False,
     )
-    def test_ab_dashboard_identity_is_read_from_env(self):
+    def test_apple_ads_dashboard_identity_is_read_from_env(self):
         from config import (
-            get_ab_test_id,
             get_adapty_dashboard_app_id,
             get_adapty_dashboard_token,
         )
 
-        self.assertEqual(get_ab_test_id(), "test-123")
         self.assertEqual(get_adapty_dashboard_app_id(), "app-456")
         self.assertEqual(get_adapty_dashboard_token(), "Bearer dashboard-secret")
+
+    @patch.dict("config.os.environ", {"AB_TEST_ID": "test-123"}, clear=False)
+    def test_ab_test_id_is_read_independently(self):
+        from config import get_ab_test_id
+
+        self.assertEqual(get_ab_test_id(), "test-123")
 
     @patch("config.os.path.isfile", return_value=True)
     @patch("builtins.open", new_callable=mock_open, read_data="09:00")

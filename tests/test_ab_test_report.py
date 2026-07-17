@@ -1,7 +1,18 @@
-"""Tests for the validated Adapty A/B Telegram report."""
-from datetime import date, datetime, timezone
+"""Tests for the strict Secret-Key A/B Telegram report."""
+from dataclasses import replace
+from datetime import date
 import unittest
 from unittest.mock import patch
+
+from config import AppConfig
+
+
+APPROVED_APP_NAME = "Unfollowers: Follow & Unfollow"
+APPROVED_TEST_NAME = "Test paywall prices. 4.99/29.99 vs 5.99/39.99"
+APPROVED_TEST_ID = "1db6e378-026f-4634-9522-ec4fa95deb99"
+APPROVED_START_DATE = date(2026, 7, 10)
+APPROVED_OLD_PAYWALL_ID = "d6d24875-e330-4ad9-8ee0-841d3452a911"
+APPROVED_NEW_PAYWALL_ID = "d6765d7f-eb06-42db-8d0d-ee21e2b41fe8"
 
 
 def _enabled_config():
@@ -10,98 +21,197 @@ def _enabled_config():
     return AbTestConfig(
         enabled=True,
         app_index=1,
-        app_name="Unfollowers: Follow & Unfollow",
-        test_name="Test paywall prices. 4.99/29.99 vs 5.99/39.99",
-        start_date=date(2026, 7, 10),
-        variant_a=AbTestVariantConfig("A", "old-paywall", "New Paywall Old Prices"),
-        variant_b=AbTestVariantConfig("B", "new-paywall", "New Paywall New Prices"),
-        test_id="test-123",
-        dashboard_app_id="app-456",
-        dashboard_token="Bearer dashboard-secret",
+        app_name=APPROVED_APP_NAME,
+        test_name=APPROVED_TEST_NAME,
+        start_date=APPROVED_START_DATE,
+        variant_a=AbTestVariantConfig(
+            "A", APPROVED_OLD_PAYWALL_ID, "New Paywall Old Prices"
+        ),
+        variant_b=AbTestVariantConfig(
+            "B", APPROVED_NEW_PAYWALL_ID, "New Paywall New Prices"
+        ),
+        test_id=APPROVED_TEST_ID,
     )
 
 
-def _snapshot():
-    from ab_test_report import AbTestReportSnapshot, AbTestVariantMetrics
+def _metrics(label, paywall_id, revenue, unique_views, purchases, arpas):
+    from adapty_ab_export import AdaptyAbVariantMetrics
 
-    return AbTestReportSnapshot(
-        rows=[
-            AbTestVariantMetrics(
-                label="A",
-                paywall_name="New Paywall Old Prices",
-                revenue=86.0,
-                paywall_views=527,
-                purchases=8,
-                arpas=5.95,
-                revenue_per_1000=155.0,
-                proceeds=73.0,
-                net_revenue=69.0,
-                probability=12.18,
-            ),
-            AbTestVariantMetrics(
-                label="B",
-                paywall_name="New Paywall New Prices",
-                revenue=163.2467,
-                paywall_views=446,
-                purchases=12,
-                arpas=8.86,
-                revenue_per_1000=291.0,
-                proceeds=139.0,
-                net_revenue=124.0,
-                probability=87.82,
-            ),
-        ],
-        collected_at=datetime(2026, 7, 17, 12, 41, tzinfo=timezone.utc),
+    return AdaptyAbVariantMetrics(
+        label=label,
+        paywall_id=paywall_id,
+        revenue=revenue,
+        unique_views=unique_views,
+        purchases=purchases,
+        arpas=arpas,
     )
 
 
 class TestAbTestReport(unittest.TestCase):
-    @patch("ab_test_report.fetch_ab_test_metrics", side_effect=lambda *_: _snapshot())
+    @patch("ab_test_report.fetch_ab_test_metrics")
     @patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config)
-    def test_formats_dashboard_metrics_source_snapshot_and_latency_note(
-        self, _mock_config, _mock_fetch
-    ):
+    def test_formats_exact_approved_unique_view_report(self, _mock_config, mock_fetch):
         from ab_test_report import build_ab_test_report
 
-        text = build_ab_test_report(report_date=date(2026, 7, 17))
+        mock_fetch.return_value = [
+            _metrics(
+                "A", APPROVED_OLD_PAYWALL_ID, 86.11157593263285, 570, 9,
+                9.56795288140365,
+            ),
+            _metrics(
+                "B", APPROVED_NEW_PAYWALL_ID, 163.2467, 573, 19,
+                8.591931578947368,
+            ),
+        ]
 
-        self.assertIn("🧪 A/B Test: Test paywall prices. 4.99/29.99 vs 5.99/39.99", text)
-        self.assertIn("📱 App: Unfollowers: Follow &amp; Unfollow", text)
-        self.assertIn("🔎 Source: Adapty A/B Test Details", text)
-        self.assertIn("🕒 Snapshot: 17.07.2026 15:41 (Europe/Minsk)", text)
-        self.assertIn("<b>A / New Paywall Old Prices</b>", text)
-        self.assertIn("💵 Revenue: $163.25", text)
-        self.assertIn("📊 Revenue per 1K users: $291", text)
-        self.assertIn("💰 Proceeds: $139", text)
-        self.assertIn("🏦 Net proceeds: $124", text)
-        self.assertIn("🎯 P2BB: 87.82%", text)
-        self.assertIn("📈 ARPAS: $8.86", text)
-        self.assertIn("📲 Paywall views: 446", text)
-        self.assertIn("💳 Purchases: 12", text)
-        self.assertIn("🔄 CR view→purchase: 2.69%", text)
-        self.assertIn("<b>B / New Paywall New Prices</b>", text)
-        self.assertIn("🏆 Лидер по revenue: B (+$77.25)", text)
-        self.assertIn("Views обновляются Adapty периодически", text)
+        expected = """🧪 A/B Test: Test paywall prices. 4.99/29.99 vs 5.99/39.99
+📱 App: Unfollowers: Follow &amp; Unfollow
 
-    def test_variant_metrics_handles_zero_views_without_division_by_zero(self):
-        from ab_test_report import AbTestVariantMetrics
+🅰️ <b>A / New Paywall Old Prices</b>
+💵 Revenue: $86.11
+📈 ARPAS: $9.57
+👥 Unique paywall views: 570
+💳 Purchases: 9
+🔄 CR unique view→purchase: 1.58%
 
-        metrics = AbTestVariantMetrics("A", "Paywall", 10.0, 0, 2, 1.0)
-        self.assertIsNone(metrics.conversion_rate)
+🅱️ <b>B / New Paywall New Prices</b>
+💵 Revenue: $163.25
+📈 ARPAS: $8.59
+👥 Unique paywall views: 573
+💳 Purchases: 19
+🔄 CR unique view→purchase: 3.32%
+
+🏆 Лидер по revenue: B (+$77.14)"""
+
+        self.assertEqual(build_ab_test_report(date(2026, 7, 17)), expected)
+
+    @patch("ab_test_report.AdaptyAbExportClient")
+    @patch("ab_test_report.get_adapty_apps")
+    def test_fetches_a_then_b_with_selected_app_secret_key(self, mock_apps, mock_client_cls):
+        from ab_test_report import fetch_ab_test_metrics
+
+        mock_apps.return_value = [AppConfig("secret-key", APPROVED_APP_NAME)]
+        mock_client_cls.return_value.fetch_variant.side_effect = [
+            _metrics("A", APPROVED_OLD_PAYWALL_ID, 1.0, 2, 1, 1.0),
+            _metrics("B", APPROVED_NEW_PAYWALL_ID, 2.0, 3, 1, 2.0),
+        ]
+        config = _enabled_config()
+
+        rows = fetch_ab_test_metrics(config, date(2026, 7, 17))
+
+        mock_client_cls.assert_called_once_with(
+            api_key="secret-key",
+            base_url=unittest.mock.ANY,
+            analytics_path=unittest.mock.ANY,
+            timezone=unittest.mock.ANY,
+        )
+        self.assertEqual([row.label for row in rows], ["A", "B"])
+        self.assertEqual(
+            mock_client_cls.return_value.fetch_variant.call_args_list[0].kwargs,
+            {
+                "label": "A",
+                "paywall_id": APPROVED_OLD_PAYWALL_ID,
+                "test_id": APPROVED_TEST_ID,
+                "start_date": APPROVED_START_DATE,
+                "end_date": date(2026, 7, 17),
+            },
+        )
+        self.assertEqual(
+            mock_client_cls.return_value.fetch_variant.call_args_list[1].kwargs,
+            {
+                "label": "B",
+                "paywall_id": APPROVED_NEW_PAYWALL_ID,
+                "test_id": APPROVED_TEST_ID,
+                "start_date": APPROVED_START_DATE,
+                "end_date": date(2026, 7, 17),
+            },
+        )
+        self.assertEqual(mock_client_cls.return_value.fetch_variant.call_count, 2)
+
+    @patch("ab_test_report.AdaptyAbExportClient")
+    @patch(
+        "ab_test_report.get_adapty_apps",
+        return_value=[AppConfig("secret-key", APPROVED_APP_NAME)],
+    )
+    def test_report_date_before_start_rejects_before_constructing_client(
+        self, _mock_apps, mock_client_cls
+    ):
+        from ab_test_report import fetch_ab_test_metrics
+
+        mock_client_cls.return_value.fetch_variant.side_effect = AssertionError(
+            "collection must not begin"
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot precede"):
+            fetch_ab_test_metrics(_enabled_config(), date(2026, 7, 9))
+        mock_client_cls.assert_not_called()
+
+    @patch("ab_test_report.AdaptyAbExportClient")
+    @patch(
+        "ab_test_report.get_adapty_apps",
+        return_value=[AppConfig("", APPROVED_APP_NAME)],
+    )
+    def test_missing_selected_secret_key_raises_before_collection(
+        self, _mock_apps, mock_client_cls
+    ):
+        from ab_test_report import fetch_ab_test_metrics
+
+        with self.assertRaisesRegex(ValueError, "Secret API Key"):
+            fetch_ab_test_metrics(_enabled_config(), date(2026, 7, 17))
+        mock_client_cls.assert_not_called()
+
+    @patch(
+        "ab_test_report.get_adapty_apps",
+        return_value=[AppConfig("secret-key", APPROVED_APP_NAME)],
+    )
+    def test_client_error_propagates_without_formatting_partial_data(self, _mock_apps):
+        from adapty_ab_export import AdaptyAbExportError
+        from ab_test_report import build_ab_test_report
+
+        with patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config), patch(
+            "ab_test_report.AdaptyAbExportClient"
+        ) as mock_client_cls:
+            mock_client_cls.return_value.fetch_variant.side_effect = AdaptyAbExportError(
+                "request failed"
+            )
+            with self.assertRaises(AdaptyAbExportError):
+                build_ab_test_report(date(2026, 7, 17))
+
+    @patch("ab_test_report.AdaptyAbExportClient")
+    @patch(
+        "ab_test_report.get_adapty_apps",
+        return_value=[AppConfig("secret-key", APPROVED_APP_NAME)],
+    )
+    def test_reversed_client_labels_are_rejected(self, _mock_apps, mock_client_cls):
+        from ab_test_report import fetch_ab_test_metrics
+
+        mock_client_cls.return_value.fetch_variant.side_effect = [
+            _metrics("B", APPROVED_OLD_PAYWALL_ID, 1.0, 1, 1, 1.0),
+            _metrics("A", APPROVED_NEW_PAYWALL_ID, 1.0, 1, 1, 1.0),
+        ]
+        with self.assertRaisesRegex(ValueError, "A then B"):
+            fetch_ab_test_metrics(_enabled_config(), date(2026, 7, 17))
+
+    def test_zero_unique_views_formats_zero_conversion_without_division_by_zero(self):
+        from ab_test_report import build_ab_test_report
+
+        rows = [
+            _metrics("A", APPROVED_OLD_PAYWALL_ID, 0.0, 0, 0, 0.0),
+            _metrics("B", APPROVED_NEW_PAYWALL_ID, 1.0, 1, 1, 1.0),
+        ]
+        with patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config), patch(
+            "ab_test_report.fetch_ab_test_metrics", return_value=rows
+        ):
+            self.assertIn("CR unique view→purchase: 0.00%", build_ab_test_report())
 
     @patch("ab_test_report.fetch_ab_test_metrics")
     @patch("ab_test_report.get_ab_test_config")
-    def test_returns_none_when_disabled(self, mock_config, mock_fetch):
+    def test_disabled_report_does_not_call_adapty(self, mock_config, mock_fetch):
         from ab_test_report import AbTestConfig, AbTestVariantConfig, build_ab_test_report
 
+        empty = AbTestVariantConfig("", "", "")
         mock_config.return_value = AbTestConfig(
-            False,
-            1,
-            "",
-            "",
-            date.today(),
-            AbTestVariantConfig("", "", ""),
-            AbTestVariantConfig("", "", ""),
+            False, 1, "", "", date.today(), empty, empty
         )
 
         self.assertIsNone(build_ab_test_report())
@@ -109,71 +219,184 @@ class TestAbTestReport(unittest.TestCase):
 
     @patch("ab_test_report.fetch_ab_test_metrics")
     @patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config)
-    def test_propagates_collection_error_and_never_formats_partial_data(
-        self, _mock_config, mock_fetch
-    ):
-        from adapty_ab_dashboard import AdaptyDashboardError
+    def test_partial_rows_are_rejected_before_formatting(self, _mock_config, mock_fetch):
         from ab_test_report import build_ab_test_report
 
-        mock_fetch.side_effect = AdaptyDashboardError("authentication failed")
-        with self.assertRaises(AdaptyDashboardError):
+        mock_fetch.return_value = [
+            _metrics("A", APPROVED_OLD_PAYWALL_ID, 1.0, 1, 1, 1.0)
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly two"):
             build_ab_test_report()
 
-    @patch("ab_test_report.AdaptyAbDashboardClient")
-    def test_fetch_delegates_to_experiment_scoped_dashboard_client(self, mock_client_cls):
-        from adapty_ab_dashboard import AdaptyAbMetrics, AdaptyAbVariantMetrics
+    def _assert_config_rejected_before_client(self, config):
         from ab_test_report import fetch_ab_test_metrics
 
-        mock_client_cls.return_value.fetch_metrics.return_value = AdaptyAbMetrics(
-            test_id="test-123",
-            test_name="Price test",
-            variants=(
-                AdaptyAbVariantMetrics("A", "old-paywall", "Old", 1, 2, 3, 4),
-                AdaptyAbVariantMetrics("B", "new-paywall", "New", 5, 6, 7, 8),
-            ),
-            collected_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
-        )
+        apps = [AppConfig("secret-key", APPROVED_APP_NAME)]
+        if config.app_index > 1:
+            apps.append(AppConfig("another-key", "Another App"))
+        with patch("ab_test_report.get_adapty_apps", return_value=apps), patch(
+            "ab_test_report.AdaptyAbExportClient"
+        ) as mock_client_cls:
+            mock_client_cls.return_value.fetch_variant.side_effect = [
+                _metrics(
+                    config.variant_a.label,
+                    config.variant_a.paywall_id,
+                    1.0,
+                    1,
+                    1,
+                    1.0,
+                ),
+                _metrics(
+                    config.variant_b.label,
+                    config.variant_b.paywall_id,
+                    2.0,
+                    1,
+                    1,
+                    2.0,
+                ),
+            ]
+            with self.assertRaisesRegex(ValueError, "approved production experiment"):
+                fetch_ab_test_metrics(config, date(2026, 7, 17))
+            mock_client_cls.assert_not_called()
+
+    def test_swapped_paywall_ids_are_rejected_before_client(self):
         config = _enabled_config()
-
-        result = fetch_ab_test_metrics(config, date(2026, 7, 17))
-
-        mock_client_cls.assert_called_once_with(
-            app_id="app-456",
-            token="Bearer dashboard-secret",
+        self._assert_config_rejected_before_client(
+            replace(
+                config,
+                variant_a=replace(
+                    config.variant_a, paywall_id=APPROVED_NEW_PAYWALL_ID
+                ),
+                variant_b=replace(
+                    config.variant_b, paywall_id=APPROVED_OLD_PAYWALL_ID
+                ),
+            )
         )
-        mock_client_cls.return_value.fetch_metrics.assert_called_once_with(
-            test_id="test-123",
-            expected_test_name=config.test_name,
-            expected_variants={
-                "A": ("old-paywall", "New Paywall Old Prices"),
-                "B": ("new-paywall", "New Paywall New Prices"),
-            },
+
+    def test_swapped_paywall_names_are_rejected_before_client(self):
+        config = _enabled_config()
+        self._assert_config_rejected_before_client(
+            replace(
+                config,
+                variant_a=replace(
+                    config.variant_a, paywall_name="New Paywall New Prices"
+                ),
+                variant_b=replace(
+                    config.variant_b, paywall_name="New Paywall Old Prices"
+                ),
+            )
         )
-        self.assertEqual(result.collected_at, datetime(2026, 7, 17, tzinfo=timezone.utc))
-        self.assertEqual([row.label for row in result.rows], ["A", "B"])
+
+    def test_wrong_variant_label_is_rejected_before_client(self):
+        config = _enabled_config()
+        self._assert_config_rejected_before_client(
+            replace(config, variant_a=replace(config.variant_a, label="B"))
+        )
+
+    def test_wrong_test_id_is_rejected_before_client(self):
+        self._assert_config_rejected_before_client(
+            replace(_enabled_config(), test_id="another-experiment")
+        )
+
+    def test_wrong_start_date_is_rejected_before_client(self):
+        self._assert_config_rejected_before_client(
+            replace(_enabled_config(), start_date=date(2026, 7, 11))
+        )
+
+    def test_wrong_app_index_is_rejected_before_client(self):
+        self._assert_config_rejected_before_client(
+            replace(_enabled_config(), app_index=2)
+        )
+
+    def test_wrong_app_name_is_rejected_before_client(self):
+        self._assert_config_rejected_before_client(
+            replace(_enabled_config(), app_name="Another App")
+        )
+
+    @patch("ab_test_report.fetch_ab_test_metrics")
+    @patch("ab_test_report.get_ab_test_config")
+    def test_wrong_test_name_is_rejected_before_collection_or_formatting(
+        self, mock_config, mock_fetch
+    ):
+        from ab_test_report import build_ab_test_report
+
+        mock_config.return_value = replace(
+            _enabled_config(), test_name="Another price test"
+        )
+        mock_fetch.side_effect = AssertionError("collection must not begin")
+
+        with self.assertRaisesRegex(ValueError, "approved production experiment"):
+            build_ab_test_report(date(2026, 7, 17))
+        mock_fetch.assert_not_called()
 
     @patch("ab_test_report.get_adapty_apps")
+    @patch("ab_test_report.get_ab_test_app_index", return_value=1)
     @patch("ab_test_report.get_ab_test_variant_value")
-    @patch("ab_test_report.get_adapty_dashboard_token", return_value="")
-    @patch("ab_test_report.get_adapty_dashboard_app_id", return_value="app-456")
-    @patch("ab_test_report.get_ab_test_id", return_value="test-123")
-    @patch("ab_test_report.get_ab_test_start_date", return_value="2026-07-10")
-    @patch("ab_test_report.get_ab_test_name", return_value="Price test")
+    @patch("ab_test_report.get_ab_test_id", return_value=APPROVED_TEST_ID)
+    @patch(
+        "ab_test_report.get_ab_test_start_date",
+        return_value=APPROVED_START_DATE.isoformat(),
+    )
+    @patch("ab_test_report.get_ab_test_name", return_value=APPROVED_TEST_NAME)
     @patch("ab_test_report.is_ab_test_report_enabled", return_value=True)
-    def test_enabled_config_requires_dashboard_token(
+    def test_enabled_config_requires_explicit_variant_label(
         self,
         _mock_enabled,
         _mock_name,
         _mock_start,
         _mock_test_id,
-        _mock_app_id,
-        _mock_token,
-        _mock_variant,
+        mock_variant,
+        _mock_app_index,
+        mock_apps,
+    ):
+        from ab_test_report import get_ab_test_config
+
+        mock_apps.return_value = [AppConfig("secret-key", APPROVED_APP_NAME)]
+        mock_variant.side_effect = lambda variant, field: {
+            ("A", "LABEL"): "",
+            ("A", "PAYWALL_ID"): APPROVED_OLD_PAYWALL_ID,
+            ("A", "PAYWALL_NAME"): "New Paywall Old Prices",
+            ("B", "LABEL"): "B",
+            ("B", "PAYWALL_ID"): APPROVED_NEW_PAYWALL_ID,
+            ("B", "PAYWALL_NAME"): "New Paywall New Prices",
+        }[(variant, field)]
+
+        with self.assertRaisesRegex(ValueError, "AB_TEST_VARIANT_A_LABEL"):
+            get_ab_test_config()
+
+    @patch(
+        "ab_test_report.get_adapty_apps",
+        return_value=[AppConfig("secret-key", APPROVED_APP_NAME)],
+    )
+    @patch("ab_test_report.get_ab_test_variant_value")
+    @patch("ab_test_report.get_ab_test_id", return_value=APPROVED_TEST_ID)
+    @patch(
+        "ab_test_report.get_ab_test_start_date",
+        return_value=APPROVED_START_DATE.isoformat(),
+    )
+    @patch("ab_test_report.get_ab_test_name", return_value=APPROVED_TEST_NAME)
+    @patch("ab_test_report.is_ab_test_report_enabled", return_value=True)
+    def test_enabled_config_rejects_duplicate_paywall_ids(
+        self,
+        _mock_enabled,
+        _mock_name,
+        _mock_start,
+        _mock_test_id,
+        mock_variant,
         _mock_apps,
     ):
         from ab_test_report import get_ab_test_config
 
-        with self.assertRaisesRegex(ValueError, "ADAPTY_DASHBOARD_TOKEN"):
+        mock_variant.side_effect = lambda variant, field: {
+            ("A", "LABEL"): "A",
+            ("A", "PAYWALL_ID"): "same-paywall",
+            ("A", "PAYWALL_NAME"): "Old",
+            ("B", "LABEL"): "B",
+            ("B", "PAYWALL_ID"): "same-paywall",
+            ("B", "PAYWALL_NAME"): "New",
+        }[(variant, field)]
+
+        with self.assertRaisesRegex(ValueError, "different"):
             get_ab_test_config()
 
 

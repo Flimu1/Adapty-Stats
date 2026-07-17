@@ -34,6 +34,11 @@ def main() -> None:
         help="Собрать и отправить только проверенный A/B-отчёт, затем выйти",
     )
     parser.add_argument(
+        "--preview-ab-report",
+        action="store_true",
+        help="Собрать A/B-отчёт и вывести его без отправки в Telegram",
+    )
+    parser.add_argument(
         "--health",
         action="store_true",
         help="Проверить конфиг и вывести OK (для health check endpoint)",
@@ -49,6 +54,16 @@ def main() -> None:
         help="Запрос Conversion API (Install→Paid) для первого приложения, вывести сырой ответ",
     )
     args = parser.parse_args()
+
+    if args.preview_ab_report:
+        from ab_test_report import build_ab_test_report
+
+        text = build_ab_test_report()
+        if not text:
+            logger.error("A/B report preview is disabled or empty")
+            raise SystemExit(1)
+        print(text)
+        return
 
     if args.debug_conversion:
         from adapty_client import _debug_conversion_response

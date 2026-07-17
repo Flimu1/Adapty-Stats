@@ -1,61 +1,80 @@
 # Архитектура решения — Adapty Daily Report Bot
 
-## Схема работы
+## Потоки выполнения
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           RAILWAY (контейнер)                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│   main.py                                                                │
-│      │                                                                   │
-│      ├── Загрузка config (config.py) из env                             │
-│      │                                                                   │
-│      ├── Инициализация APScheduler (scheduler.py)                        │
-│      │         │                                                         │
-│      │         └── Ежедневно в 09:00 Europe/Minsk → job: send_daily()   │
-│      │                                                                   │
-│      └── Запуск планировщика (blocking)                                  │
-│                                                                         │
-├─────────────────────────────────────────────────────────────────────────┤
-│   send_daily_report() (report_builder.py + adapty_client + telegram)     │
-│      │                                                                   │
-│      ├── 1. adapty_client: параллельно запросы к Adapty API             │
-│      │         (concurrent.futures) для каждого из 3 приложений         │
-│      │         → MRR total, MRR delta 24h, Installs total, delta 24h    │
-│      │                                                                   │
-│      ├── 2. report_builder: собрать данные, посчитать дельты,            │
-│      │         отформатировать строку (emoji, жирный, +/− в скобках)    │
-│      │                                                                   │
-│      └── 3. telegram_sender: отправить сообщение в чат (Markdown)       │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-         │                                    │
-         ▼                                    ▼
-   Adapty Analytics Export API          Telegram Bot API
-   (POST, Api-Key, JSON body)           (sendMessage, token, chat_id)
+main.py
+  ├─ --preview-ab-report → build_ab_test_report() → stdout → exit
+  ├─ --send-ab-report    → send_ab_report_once() → Telegram → exit
+  └─ обычный режим       → APScheduler → daily delivery
+                                      ├─ ежедневная сводка
+                                      ├─ A/B-отчёт (если включён)
+                                      └─ Apple Ads-отчёт (если включён)
 ```
 
-## Поток данных
+`--preview-ab-report` разбирается раньше любого debug-, send- или scheduler-
+пути. Он строит один полный A/B-отчёт, печатает его ровно один раз и завершает
+процесс. Этот путь не импортирует отправку Telegram и не запускает планировщик;
+он сохраняет это свойство даже в комбинации с `--send-ab-report`. Пустой либо
+отключённый отчёт завершает процесс с кодом 1 без печати и без отправки.
 
-1. **Конфиг**  
-   `config.py` читает переменные окружения (на Railway — из UI, локально — из `.env`): ключи Adapty по приложениям, токен бота, Chat ID, при необходимости базовый URL API.
+Поскольку persisted `AB_TEST_REPORT_ENABLED` в `.env` и Railway остаётся
+`false` до принятия parity, операционный preview использует только разовый
+process-level override:
 
-2. **Планировщик**  
-   `scheduler.py` добавляет одну job на 09:00 по Europe/Minsk. При срабатывании вызывается функция отправки отчёта.
+```bash
+AB_TEST_REPORT_ENABLED=true python main.py --preview-ab-report
+railway run env AB_TEST_REPORT_ENABLED=true python main.py --preview-ab-report
+```
 
-3. **Сбор метрик**  
-   `adapty_client.py` для каждого приложения выполняет запросы к Adapty (Retrieve analytics data и при необходимости другие эндпоинты). Запросы к разным приложениям выполняются параллельно через `concurrent.futures`.
+Вторая команда не меняет persisted Railway variable. Ни одна команда preview не
+отправляет Telegram; preview без override при persisted `false` корректно
+завершается с кодом 1.
 
-4. **Построение отчёта**  
-   `report_builder.py` получает сырые данные (MRR, Installs, total и за последние 24ч), считает дельты, форматирует числа (запятые, $ для MRR) и собирает текст блоками по приложениям в формате из ТЗ.
+## A/B: изолированный Secret API путь
 
-5. **Отправка**  
-   `telegram_sender.py` отправляет готовый текст в Telegram через Bot API с `parse_mode=Markdown`, в указанный Chat ID.
+`ab_test_report.py` использует `ADAPTY_API_KEY_APP1` и создаёт
+`AdaptyAbExportClient`. Production A/B-путь pinned к app index `1`, приложению
+`Unfollowers: Follow & Unfollow`, эксперименту
+`1db6e378-026f-4634-9522-ec4fa95deb99` со стартом `2026-07-10` и mapping:
 
-6. **Ошибки**  
-   На каждом этапе ошибки логируются; при сбое API или сети отправка в Telegram может не выполниться, но процесс не падает без логирования.
+- A: `d6d24875-e330-4ad9-8ee0-841d3452a911` — `New Paywall Old Prices`;
+- B: `d6765d7f-eb06-42db-8d0d-ee21e2b41fe8` — `New Paywall New Prices`.
 
-## Расширяемость
+Любое отклонение identity-конфигурации отклоняется до создания клиента и
+форматирования. Клиент выполняет только
+Adapty Analytics Export API запросы с `Authorization: Api-Key <Secret API Key>`.
+Каждый запрос ограничен датами теста, `paywall_id` и
+`placement_audience_version_id` (experiment ID).
 
-- Добавление 4-го приложения: в конфиге добавляется ещё один набор ключей/ID приложения, в `report_builder` и `adapty_client` — ещё один элемент в списке приложений без изменения общей логики.
+Конфигурация A/B требует точного совпадения pinned identity-полей. Вариант A —
+Old Prices, вариант B — New Prices. После
+успешного получения и строгой проверки обоих вариантов формируется единственное
+HTML-сообщение Telegram с разрешёнными метриками: revenue, ARPAS, `Unique
+paywall views`, purchases, `CR unique view→purchase` и строкой лидера. Views и
+CR всегда имеют семантику уникального просмотра.
+
+Путь fail-closed атомарен: любая ошибка конфигурации, API или валидации отменяет
+всё форматирование и доставку — частичный A/B-отчёт невозможен. A/B-код не
+создаёт Dashboard/WebView-сессию и не читает Dashboard credentials.
+
+В ежедневной доставке планировщик сначала формирует основную сводку, затем при
+`AB_TEST_REPORT_ENABLED=true` доставляет отдельный A/B-отчёт. В Railway флаг
+остается `false`, пока проверка preview, здоровый деплой и live parity не
+приняты.
+
+## Apple Ads: отдельная Dashboard-зона
+
+Apple Ads Manager может использовать `ADAPTY_DASHBOARD_TOKEN`,
+`ADAPTY_DASHBOARD_COMPANY_ID` и `ADAPTY_DASHBOARD_APP_ID` для рекламного
+отчёта. Эти переменные Apple Ads-only: они сохранены для Apple Ads и не являются
+входными данными или fallback для A/B Secret API.
+
+## Безопасность логов
+
+`safe_logging.configure_secret_redaction()` устанавливает фильтр на текущие
+root handlers до сетевых запросов. Он скрывает Telegram, Dashboard и ASA
+credentials, а также все непустые env-значения с именем
+`ADAPTY_API_KEY_APP` и числовым суффиксом. Аргументы логов, traceback и URL
+Telegram обрабатываются до форматирования. Секреты не выводятся в исходный код,
+документацию, preview, отчёты или логи.

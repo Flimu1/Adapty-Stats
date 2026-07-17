@@ -10,6 +10,7 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 _TELEGRAM_BOT_PATH = re.compile(r"(?<=/bot)[^/\s?#]+")
+_ADAPTY_API_KEY_APP_ENV = re.compile(r"ADAPTY_API_KEY_APP\d+")
 
 
 def _normalized_secrets(values: Iterable[str]) -> tuple[str, ...]:
@@ -74,6 +75,11 @@ def configure_secret_redaction(secrets: Iterable[str] | None = None) -> None:
             os.getenv("TELEGRAM_BOT_TOKEN", ""),
             os.getenv("ADAPTY_DASHBOARD_TOKEN", ""),
             os.getenv("ADAPTY_ASA_AUTH_TOKEN", ""),
+            *(
+                value
+                for key, value in os.environ.items()
+                if _ADAPTY_API_KEY_APP_ENV.fullmatch(key) and value.strip()
+            ),
         )
     redaction_filter = SecretRedactionFilter(secrets)
     root = logging.getLogger()

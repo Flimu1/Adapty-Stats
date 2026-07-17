@@ -48,6 +48,66 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
    python main.py
    ```
 
+## A/B-отчёт: Secret API, preview и единичная отправка
+
+Путь A/B-отчёта использует только Adapty Export Analytics API с заголовком
+`Authorization: Api-Key <Secret API Key>`. Для него не используются Dashboard,
+WebView-сессия, `ADAPTY_DASHBOARD_TOKEN`, `ADAPTY_DASHBOARD_COMPANY_ID` или
+`ADAPTY_DASHBOARD_APP_ID`: эти переменные относятся исключительно к Apple Ads.
+
+Production A/B-отчёт намеренно pinned к одному согласованному эксперименту.
+При включённом отчёте код принимает только эту точную identity-конфигурацию:
+
+- `AB_TEST_APP_INDEX=1`, `ADAPTY_APP_NAME_1=Unfollowers: Follow & Unfollow`;
+- `AB_TEST_ID=1db6e378-026f-4634-9522-ec4fa95deb99`;
+- `AB_TEST_NAME=Test paywall prices. 4.99/29.99 vs 5.99/39.99`;
+- `AB_TEST_START_DATE=2026-07-10`;
+- A / Old Prices: paywall `d6d24875-e330-4ad9-8ee0-841d3452a911`,
+  имя `New Paywall Old Prices`;
+- B / New Prices: paywall `d6765d7f-eb06-42db-8d0d-ee21e2b41fe8`,
+  имя `New Paywall New Prices`.
+
+Для сбора используется только `ADAPTY_API_KEY_APP1`. Любое отклонение test ID,
+даты, имени теста, приложения, label, paywall ID или paywall name завершает A/B
+путь до создания API-клиента и до форматирования сообщения.
+
+Каждый запрос метрик фильтруется по датам, `paywall_id` и
+`placement_audience_version_id` (ID эксперимента). В сообщении Telegram
+`Unique paywall views` означает уникальные просмотры paywall, а
+`CR unique view→purchase` — конверсию уникальный просмотр → покупка. В нём
+остаются только согласованные метрики вариантов и строка лидера; при любой
+неполной или некорректной выборке сообщение не форматируется и не отправляется.
+
+По умолчанию `AB_TEST_REPORT_ENABLED=false`. Оставляйте persisted-флаг false в
+`.env` и Railway, пока деплой не проверен и не принята live parity. Поэтому для
+безопасной локальной проверки нужен разовый ephemeral override; он собирает
+ровно один отчёт, печатает его и никогда не вызывает Telegram или планировщик:
+
+```bash
+AB_TEST_REPORT_ENABLED=true python main.py --preview-ab-report
+```
+
+В Railway тот же preview запускается без изменения persisted Railway variable:
+
+```bash
+railway run env AB_TEST_REPORT_ENABLED=true python main.py --preview-ab-report
+```
+
+Обе команды ничего не отправляют в Telegram. При persisted `false` команда
+`python main.py --preview-ab-report` без override завершается с кодом 1, не
+печатает отчёт и не выполняет отправку. `--preview-ab-report` имеет приоритет
+даже вместе с `--send-ab-report`.
+После принятия preview и явного включения `AB_TEST_REPORT_ENABLED=true` одна
+ручная отправка выполняется командой:
+
+```bash
+python main.py --send-ab-report
+```
+
+Она отправляет один готовый A/B-отчёт либо завершается ошибкой без частичной
+отправки. В ежедневном режиме A/B-отчёт доставляется отдельным сообщением после
+основной ежедневной сводки, только когда enable-флаг включён.
+
 ## Ручной сбор данных (кнопка в боте)
 
 Пока работает планировщик, бот слушает чат. В том же чате, куда приходит ежедневный отчёт:
@@ -71,6 +131,8 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
    - `ADAPTY_API_KEY_APP1`, `ADAPTY_APP_NAME_1`
    - `ADAPTY_API_KEY_APP2`, `ADAPTY_APP_NAME_2`
   - При необходимости: `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
+   - Для Apple Ads-only отчёта при его использовании: `ADAPTY_DASHBOARD_TOKEN`,
+     `ADAPTY_DASHBOARD_COMPANY_ID`, `ADAPTY_DASHBOARD_APP_ID`
 
 3. **Procfile** уже настроен: `worker: python main.py`. Railway запустит процесс как worker (без HTTP). Отчёт будет уходить раз в сутки в заданное время.
 
@@ -88,9 +150,9 @@ gh repo create adapty-stats --private --source=. --remote=origin --push
 
 ## Формат отчёта
 
-- Заголовок: 📊 Отчёт на ДД.ММ.ГГГГ  
-- По каждому приложению: **Название**, 💰 MRR: $X,XXX (±$YY), 📲 Installs: X,XXX (±ZZ).  
-- Parse mode в Telegram: Markdown.
+- Заголовок: 📊 Отчёт на ДД.ММ.ГГГГ
+- По каждому приложению: жирное название, 💰 MRR: $X,XXX (±$YY), 📲 Installs: X,XXX (±ZZ).
+- Сообщения отправляются с Telegram parse mode `HTML`; A/B-заголовки используют `<b>…</b>`.
 
 ## Adapty API
 
