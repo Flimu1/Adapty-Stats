@@ -15,6 +15,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
 )
+from safe_logging import configure_secret_redaction
+
+configure_secret_redaction()
 logger = logging.getLogger(__name__)
 
 

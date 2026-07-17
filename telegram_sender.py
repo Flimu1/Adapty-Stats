@@ -46,7 +46,7 @@ def send_message(text: str, parse_mode: str = "HTML", chat_id: Optional[str] = N
         r.raise_for_status()
         return True
     except requests.RequestException as e:
-        logger.exception("Telegram send failed: %s", e)
+        logger.error("Telegram send failed (%s)", type(e).__name__)
         return False
 
 

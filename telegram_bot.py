@@ -52,7 +52,7 @@ def _api(method: str, payload: dict) -> Optional[dict]:
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
-        logger.warning("Telegram API %s failed: %s", method, e)
+        logger.warning("Telegram API %s failed (%s)", method, type(e).__name__)
         return None
 
 
@@ -341,9 +341,9 @@ def _poll_loop() -> None:
                     # Ошибка обработки одного update не должна ломать весь цикл
                     logger.exception("Failed to process update %s: %s", upd.get("update_id"), e)
 
-        except requests.exceptions.ReadTimeout as e:
+        except requests.exceptions.ReadTimeout:
             # Long polling timeout — это нормально, просто пробуем снова
-            logger.debug("getUpdates read timeout (expected for long polling): %s", e)
+            logger.debug("getUpdates read timeout (expected for long polling)")
             consecutive_errors = 0
             continue
 
@@ -352,8 +352,8 @@ def _poll_loop() -> None:
             consecutive_errors += 1
             sleep_time = min(5 * consecutive_errors, max_sleep)
             logger.warning(
-                "getUpdates connection error (attempt %d): %s. Retrying in %ds...",
-                consecutive_errors, e, sleep_time
+                "getUpdates connection error (attempt %d, %s). Retrying in %ds...",
+                consecutive_errors, type(e).__name__, sleep_time
             )
             time.sleep(sleep_time)
 
@@ -362,8 +362,8 @@ def _poll_loop() -> None:
             consecutive_errors += 1
             sleep_time = min(5 * consecutive_errors, max_sleep)
             logger.warning(
-                "getUpdates request failed (attempt %d): %s. Retrying in %ds...",
-                consecutive_errors, e, sleep_time
+                "getUpdates request failed (attempt %d, %s). Retrying in %ds...",
+                consecutive_errors, type(e).__name__, sleep_time
             )
             time.sleep(sleep_time)
 
