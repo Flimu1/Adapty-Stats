@@ -2,6 +2,7 @@
 Отправка сообщений в Telegram (сводный отчёт и тестовое сообщение).
 """
 import logging
+from datetime import date
 from typing import Optional
 
 import requests
@@ -66,6 +67,21 @@ def test_send() -> bool:
         return False
     send_followup_reports(report.report_date)
     return True
+
+
+def send_ab_report_once(report_date: Optional[date] = None) -> bool:
+    """Build and send exactly one validated A/B report to the production target."""
+    from ab_test_report import build_ab_test_report
+
+    try:
+        text = build_ab_test_report(report_date=report_date)
+    except Exception as err:
+        logger.error("A/B report build failed (%s)", type(err).__name__)
+        return False
+    if not text:
+        logger.error("A/B report is disabled or empty")
+        return False
+    return send_message(text)
 
 
 def build_report_text_for_test() -> str:

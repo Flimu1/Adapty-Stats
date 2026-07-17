@@ -6,6 +6,48 @@ from unittest.mock import patch
 
 
 class TestTelegramSender(unittest.TestCase):
+    @patch("telegram_sender.send_message", return_value=True)
+    @patch("ab_test_report.build_ab_test_report", return_value="Verified A/B report")
+    def test_send_ab_report_once_sends_exactly_one_ab_message(
+        self,
+        mock_build,
+        mock_send,
+    ):
+        from datetime import date
+        from telegram_sender import send_ab_report_once
+
+        report_date = date(2026, 7, 17)
+        self.assertTrue(send_ab_report_once(report_date))
+
+        mock_build.assert_called_once_with(report_date=report_date)
+        mock_send.assert_called_once_with("Verified A/B report")
+
+    @patch("telegram_sender.send_message")
+    @patch("ab_test_report.build_ab_test_report", return_value=None)
+    def test_send_ab_report_once_does_not_send_when_disabled(
+        self,
+        mock_build,
+        mock_send,
+    ):
+        from telegram_sender import send_ab_report_once
+
+        self.assertFalse(send_ab_report_once())
+        mock_build.assert_called_once_with(report_date=None)
+        mock_send.assert_not_called()
+
+    @patch("telegram_sender.send_message")
+    @patch("ab_test_report.build_ab_test_report", side_effect=RuntimeError("bad data"))
+    def test_send_ab_report_once_does_not_send_on_build_error(
+        self,
+        _mock_build,
+        mock_send,
+    ):
+        from telegram_sender import send_ab_report_once
+
+        with self.assertLogs("telegram_sender", level="ERROR"):
+            self.assertFalse(send_ab_report_once())
+        mock_send.assert_not_called()
+
     @patch("telegram_sender.get_telegram_topic_id", return_value=None)
     @patch("telegram_sender.get_telegram_chat_id", return_value="-100123")
     @patch("telegram_sender.get_telegram_token", return_value="123456:secret-token")

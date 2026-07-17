@@ -29,6 +29,11 @@ def main() -> None:
         help="Собрать отчёт по Adapty и один раз отправить в Telegram, затем выйти",
     )
     parser.add_argument(
+        "--send-ab-report",
+        action="store_true",
+        help="Собрать и отправить только проверенный A/B-отчёт, затем выйти",
+    )
+    parser.add_argument(
         "--health",
         action="store_true",
         help="Проверить конфиг и вывести OK (для health check endpoint)",
@@ -72,6 +77,16 @@ def main() -> None:
             logger.info("Test report sent")
         else:
             logger.error("Test send failed")
+            sys.exit(1)
+        return
+
+    if args.send_ab_report:
+        from telegram_sender import send_ab_report_once
+
+        if send_ab_report_once():
+            logger.info("A/B report sent")
+        else:
+            logger.error("A/B report send failed")
             sys.exit(1)
         return
 
