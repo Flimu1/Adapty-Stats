@@ -1,58 +1,157 @@
-"""
-Tests for the A/B test Telegram overview report.
-"""
-from datetime import date
+"""Tests for the validated Adapty A/B Telegram report."""
+from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import patch
 
 
-def _mock_enabled_config():
+def _enabled_config():
     from ab_test_report import AbTestConfig, AbTestVariantConfig
 
     return AbTestConfig(
         enabled=True,
         app_index=1,
         app_name="Unfollowers: Follow & Unfollow",
-        test_name="Unfollowers: Follow & Unfollow",
-        start_date=date(2026, 6, 1),
-        variant_a=AbTestVariantConfig(
-            label="Variant A",
-            paywall_id="paywall_a",
-            paywall_name="Old Paywall",
-        ),
-        variant_b=AbTestVariantConfig(
-            label="Variant B",
-            paywall_id="paywall_b",
-            paywall_name="New Paywall",
-        ),
+        test_name="Test paywall prices. 4.99/29.99 vs 5.99/39.99",
+        start_date=date(2026, 7, 10),
+        variant_a=AbTestVariantConfig("A", "new-paywall", "New Paywall New Prices"),
+        variant_b=AbTestVariantConfig("B", "old-paywall", "New Paywall Old Prices"),
+        test_id="test-123",
+        dashboard_app_id="app-456",
+        dashboard_token="Bearer dashboard-secret",
     )
 
 
-def _mock_metrics(_config, report_date):
-    from ab_test_report import AbTestVariantMetrics
+def _snapshot():
+    from ab_test_report import AbTestReportSnapshot, AbTestVariantMetrics
 
-    assert report_date == date(2026, 6, 4)
-    return [
-        AbTestVariantMetrics(
-            label="Variant A",
-            paywall_name="Old Paywall",
-            revenue=1234.56,
-            paywall_views=1200,
-            purchases=18,
-            arpas=1.03,
-        ),
-        AbTestVariantMetrics(
-            label="Variant B",
-            paywall_name="New Paywall",
-            revenue=1500.0,
-            paywall_views=1000,
-            purchases=24,
-            arpas=1.5,
-        ),
-    ]
+    return AbTestReportSnapshot(
+        rows=[
+            AbTestVariantMetrics(
+                label="A",
+                paywall_name="New Paywall New Prices",
+                revenue=163.2467,
+                paywall_views=446,
+                purchases=12,
+                arpas=8.86,
+                revenue_per_1000=291.0,
+                proceeds=139.0,
+                net_revenue=124.0,
+                probability=87.82,
+            ),
+            AbTestVariantMetrics(
+                label="B",
+                paywall_name="New Paywall Old Prices",
+                revenue=86.0,
+                paywall_views=527,
+                purchases=8,
+                arpas=5.95,
+                revenue_per_1000=155.0,
+                proceeds=73.0,
+                net_revenue=69.0,
+                probability=12.18,
+            ),
+        ],
+        collected_at=datetime(2026, 7, 17, 12, 41, tzinfo=timezone.utc),
+    )
 
 
 class TestAbTestReport(unittest.TestCase):
+    @patch("ab_test_report.fetch_ab_test_metrics", side_effect=lambda *_: _snapshot())
+    @patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config)
+    def test_formats_dashboard_metrics_source_snapshot_and_latency_note(
+        self, _mock_config, _mock_fetch
+    ):
+        from ab_test_report import build_ab_test_report
+
+        text = build_ab_test_report(report_date=date(2026, 7, 17))
+
+        self.assertIn("🧪 A/B Test: Test paywall prices. 4.99/29.99 vs 5.99/39.99", text)
+        self.assertIn("📱 App: Unfollowers: Follow &amp; Unfollow", text)
+        self.assertIn("🔎 Source: Adapty A/B Test Details", text)
+        self.assertIn("🕒 Snapshot: 17.07.2026 15:41 (Europe/Minsk)", text)
+        self.assertIn("<b>A / New Paywall New Prices</b>", text)
+        self.assertIn("💵 Revenue: $163.25", text)
+        self.assertIn("📊 Revenue per 1K users: $291", text)
+        self.assertIn("💰 Proceeds: $139", text)
+        self.assertIn("🏦 Net proceeds: $124", text)
+        self.assertIn("🎯 P2BB: 87.82%", text)
+        self.assertIn("📈 ARPAS: $8.86", text)
+        self.assertIn("📲 Paywall views: 446", text)
+        self.assertIn("💳 Purchases: 12", text)
+        self.assertIn("🔄 CR view→purchase: 2.69%", text)
+        self.assertIn("<b>B / New Paywall Old Prices</b>", text)
+        self.assertIn("🏆 Лидер по revenue: A (+$77.25)", text)
+        self.assertIn("Views обновляются Adapty периодически", text)
+
+    def test_variant_metrics_handles_zero_views_without_division_by_zero(self):
+        from ab_test_report import AbTestVariantMetrics
+
+        metrics = AbTestVariantMetrics("A", "Paywall", 10.0, 0, 2, 1.0)
+        self.assertIsNone(metrics.conversion_rate)
+
+    @patch("ab_test_report.fetch_ab_test_metrics")
+    @patch("ab_test_report.get_ab_test_config")
+    def test_returns_none_when_disabled(self, mock_config, mock_fetch):
+        from ab_test_report import AbTestConfig, AbTestVariantConfig, build_ab_test_report
+
+        mock_config.return_value = AbTestConfig(
+            False,
+            1,
+            "",
+            "",
+            date.today(),
+            AbTestVariantConfig("", "", ""),
+            AbTestVariantConfig("", "", ""),
+        )
+
+        self.assertIsNone(build_ab_test_report())
+        mock_fetch.assert_not_called()
+
+    @patch("ab_test_report.fetch_ab_test_metrics")
+    @patch("ab_test_report.get_ab_test_config", side_effect=_enabled_config)
+    def test_propagates_collection_error_and_never_formats_partial_data(
+        self, _mock_config, mock_fetch
+    ):
+        from adapty_ab_dashboard import AdaptyDashboardError
+        from ab_test_report import build_ab_test_report
+
+        mock_fetch.side_effect = AdaptyDashboardError("authentication failed")
+        with self.assertRaises(AdaptyDashboardError):
+            build_ab_test_report()
+
+    @patch("ab_test_report.AdaptyAbDashboardClient")
+    def test_fetch_delegates_to_experiment_scoped_dashboard_client(self, mock_client_cls):
+        from adapty_ab_dashboard import AdaptyAbMetrics, AdaptyAbVariantMetrics
+        from ab_test_report import fetch_ab_test_metrics
+
+        mock_client_cls.return_value.fetch_metrics.return_value = AdaptyAbMetrics(
+            test_id="test-123",
+            test_name="Price test",
+            variants=(
+                AdaptyAbVariantMetrics("A", "new-paywall", "New", 1, 2, 3, 4),
+                AdaptyAbVariantMetrics("B", "old-paywall", "Old", 5, 6, 7, 8),
+            ),
+            collected_at=datetime(2026, 7, 17, tzinfo=timezone.utc),
+        )
+        config = _enabled_config()
+
+        result = fetch_ab_test_metrics(config, date(2026, 7, 17))
+
+        mock_client_cls.assert_called_once_with(
+            app_id="app-456",
+            token="Bearer dashboard-secret",
+        )
+        mock_client_cls.return_value.fetch_metrics.assert_called_once_with(
+            test_id="test-123",
+            expected_test_name=config.test_name,
+            expected_variants={
+                "A": ("new-paywall", "New Paywall New Prices"),
+                "B": ("old-paywall", "New Paywall Old Prices"),
+            },
+        )
+        self.assertEqual(result.collected_at, datetime(2026, 7, 17, tzinfo=timezone.utc))
+        self.assertEqual([row.label for row in result.rows], ["A", "B"])
+
     @patch("ab_test_report.get_adapty_apps")
     @patch("ab_test_report.get_ab_test_variant_value")
     @patch("ab_test_report.get_adapty_dashboard_token", return_value="")
@@ -76,146 +175,6 @@ class TestAbTestReport(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "ADAPTY_DASHBOARD_TOKEN"):
             get_ab_test_config()
-
-    @patch("ab_test_report.fetch_ab_test_metrics", side_effect=_mock_metrics)
-    @patch("ab_test_report.get_ab_test_config", side_effect=_mock_enabled_config)
-    def test_build_ab_test_report_formats_variants_and_leader(self, _mock_config, _mock_fetch):
-        from ab_test_report import build_ab_test_report
-
-        text = build_ab_test_report(report_date=date(2026, 6, 4))
-
-        self.assertIn("🧪 A/B Test: Unfollowers: Follow &amp; Unfollow", text)
-        self.assertIn("📱 App: Unfollowers: Follow &amp; Unfollow", text)
-        self.assertIn("<b>Variant A / Old Paywall</b>", text)
-        self.assertIn("💵 Revenue: $1,234.56", text)
-        self.assertIn("📈 ARPAS: $1.03", text)
-        self.assertIn("📲 Paywall views: 1,200", text)
-        self.assertIn("💳 Purchases: 18", text)
-        self.assertIn("🔄 CR view→purchase: 1.50%", text)
-        self.assertIn("<b>Variant B / New Paywall</b>", text)
-        self.assertIn("💵 Revenue: $1,500", text)
-        self.assertIn("📈 ARPAS: $1.50", text)
-        self.assertIn("🔄 CR view→purchase: 2.40%", text)
-        self.assertIn("🏆 Лидер по revenue: Variant B (+$265.44)", text)
-
-    def test_variant_metrics_handles_zero_views_without_division_by_zero(self):
-        from ab_test_report import AbTestVariantMetrics
-
-        metrics = AbTestVariantMetrics(
-            label="Variant A",
-            paywall_name="Old Paywall",
-            revenue=10.0,
-            paywall_views=0,
-            purchases=2,
-        )
-
-        self.assertIsNone(metrics.conversion_rate)
-
-    @patch("ab_test_report.fetch_ab_test_metrics")
-    @patch("ab_test_report.get_ab_test_config")
-    def test_build_ab_test_report_returns_none_when_disabled(self, mock_config, mock_fetch):
-        from ab_test_report import AbTestConfig, AbTestVariantConfig, build_ab_test_report
-
-        mock_config.return_value = AbTestConfig(
-            enabled=False,
-            app_index=1,
-            app_name="",
-            test_name="Unfollowers: Follow & Unfollow",
-            start_date=date(2026, 6, 1),
-            variant_a=AbTestVariantConfig("Variant A", "a", "A"),
-            variant_b=AbTestVariantConfig("Variant B", "b", "B"),
-        )
-
-        self.assertIsNone(build_ab_test_report(report_date=date(2026, 6, 4)))
-        mock_fetch.assert_not_called()
-
-    @patch("ab_test_report.fetch_ab_test_metrics")
-    @patch("ab_test_report.get_ab_test_config", side_effect=_mock_enabled_config)
-    def test_build_ab_test_report_shows_revenue_equal(self, _mock_config, mock_fetch):
-        from ab_test_report import AbTestVariantMetrics, build_ab_test_report
-
-        mock_fetch.return_value = [
-            AbTestVariantMetrics("Variant A", "Old Paywall", 100.0, 10, 1),
-            AbTestVariantMetrics("Variant B", "New Paywall", 100.0, 20, 3),
-        ]
-
-        text = build_ab_test_report(report_date=date(2026, 6, 4))
-
-        self.assertIn("🤝 Revenue equal", text)
-
-    @patch("ab_test_report.fetch_ab_test_metrics")
-    @patch("ab_test_report.get_ab_test_config", side_effect=_mock_enabled_config)
-    def test_build_ab_test_report_shows_arpas_na_when_missing(self, _mock_config, mock_fetch):
-        from ab_test_report import AbTestVariantMetrics, build_ab_test_report
-
-        mock_fetch.return_value = [
-            AbTestVariantMetrics("Variant A", "Old Paywall", 100.0, 10, 1, None),
-            AbTestVariantMetrics("Variant B", "New Paywall", 120.0, 20, 3, None),
-        ]
-
-        text = build_ab_test_report(report_date=date(2026, 6, 4))
-
-        self.assertIn("📈 ARPAS: $N/A", text)
-
-    def test_extract_arpas_prefers_total_row(self):
-        from ab_test_report import _extract_arpas
-
-        data = {
-            "data": [
-                {
-                    "type": "segment",
-                    "total_arpas_usd": 1.11,
-                    "values": [{"arpas_usd": 1.22}],
-                },
-                {
-                    "type": "total",
-                    "total_arpas_usd": "2.34",
-                    "values": [{"arpas_usd": 2.45}],
-                },
-            ]
-        }
-
-        self.assertEqual(_extract_arpas(data), 2.34)
-
-    def test_extract_arpas_uses_first_row_total_without_total_row(self):
-        from ab_test_report import _extract_arpas
-
-        data = {
-            "data": [
-                {
-                    "type": "paywall",
-                    "total_arpas_usd": "1.23",
-                    "values": [{"arpas_usd": 1.24}],
-                }
-            ]
-        }
-
-        self.assertEqual(_extract_arpas(data), 1.23)
-
-    def test_extract_arpas_falls_back_to_last_value(self):
-        from ab_test_report import _extract_arpas
-
-        data = {
-            "data": [
-                {
-                    "type": "paywall",
-                    "values": [
-                        {"period": 1, "arpas_usd": 1.0},
-                        {"period": 2, "arpas_usd": "1.5"},
-                    ],
-                }
-            ]
-        }
-
-        self.assertEqual(_extract_arpas(data), 1.5)
-
-    def test_extract_arpas_returns_none_for_empty_or_invalid_data(self):
-        from ab_test_report import _extract_arpas
-
-        self.assertIsNone(_extract_arpas(None))
-        self.assertIsNone(_extract_arpas({}))
-        self.assertIsNone(_extract_arpas({"data": {}}))
-        self.assertIsNone(_extract_arpas({"data": [{"values": [{"arpas_usd": "bad"}]}]}))
 
 
 if __name__ == "__main__":
