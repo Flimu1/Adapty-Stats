@@ -1,352 +1,163 @@
-"""
-Тест формата отчёта и расчёта Total MRR / Total Downloads.
-Запуск из корня: python -m pytest tests/test_report_builder.py -v
-или: python tests/test_report_builder.py
-"""
+"""Regression tests for canonical, integrity-aware Telegram report rendering."""
+
 from datetime import date
 import unittest
 from unittest.mock import patch
 
+from daily_report_contract import (
+    CANONICAL_APP_NAMES,
+    DailyMetricsSnapshot,
+    IntegrityIssue,
+)
 
-def _mock_fetch_all_metrics(*_args, **_kwargs):
-    """Мок: два приложения с известными суммами для проверки Total."""
-    return [
-        {
-            "index": 0,
-            "name": "App One",
-            "mrr_total": 1000.5,
-            "mrr_delta_24h": 50.25,
-            "arr_total": 12006.0,
-            "arr_delta_24h": 603.0,
-            "revenue_total": 200.0,
-            "revenue_per_day": 25.0,
-            "installs_total": 5000,
-            "installs_delta_24h": 120,
-            "conv_rate": 1.2,
-            "conv_from": 5000,
-            "conv_to": 60,
+
+def valid_rows() -> list[dict]:
+    rows: list[dict] = []
+    for index, name in enumerate(CANONICAL_APP_NAMES, start=1):
+        mrr = float(index * 100)
+        conv_from = 100 * index
+        conv_to = index
+        rows.append({
+            "index": index - 1,
+            "name": name,
+            "mrr_total": mrr,
+            "mrr_delta_24h": float(index),
+            "arr_total": mrr * 12,
+            "arr_delta_24h": float(index * 12),
+            "revenue_total": float(index * 100),
+            "revenue_per_day": float(index * 10),
+            "installs_total": 1000 * index,
+            "installs_delta_24h": 100 * index,
+            "conv_rate": conv_to / conv_from * 100,
+            "conv_from": conv_from,
+            "conv_to": conv_to,
+            "issues": (),
             "is_visible": True,
-        },
-        {
-            "index": 1,
-            "name": "App Two",
-            "mrr_total": 2000.0,
-            "mrr_delta_24h": -10.5,
-            "arr_total": 24000.0,
-            "arr_delta_24h": -126.0,
-            "revenue_total": 300.0,
-            "revenue_per_day": 35.0,
-            "installs_total": 3000,
-            "installs_delta_24h": 80,
-            "conv_rate": 1.0,
-            "conv_from": 3000,
-            "conv_to": 30,
-            "is_visible": True,
-        },
-    ]
+        })
+    return rows
 
 
-def _mock_fetch_all_metrics_with_anomaly(*_args, **_kwargs):
-    """Мок с неконсистентными installs для проверки аномалий."""
-    return [
-        {
-            "index": 0,
-            "name": "Broken App",
-            "mrr_total": 100.0,
-            "mrr_delta_24h": 5.0,
-            "arr_total": 1200.0,
-            "arr_delta_24h": 60.0,
-            "revenue_total": 50.0,
-            "revenue_per_day": 5.0,
-            "installs_total": 20,
-            "installs_delta_24h": 25,
-            "conv_rate": 5.0,
-            "conv_from": 20,
-            "conv_to": 1,
-            "is_visible": True,
-        }
-    ]
+def build_with_rows(
+    rows: list[dict],
+    portfolio_issues: tuple[IntegrityIssue, ...] = (),
+):
+    from report_builder import build_report
 
-
-def _mock_fetch_with_hidden_app(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    rows.append(
-        {
-            "index": 2,
-            "name": "Hidden Portfolio App",
-            "mrr_total": 999999.0,
-            "mrr_delta_24h": 888888.0,
-            "arr_total": 777777.0,
-            "arr_delta_24h": 666666.0,
-            "revenue_total": 555555.0,
-            "revenue_per_day": 444444.0,
-            "installs_total": 333333,
-            "installs_delta_24h": 222222,
-            "conv_rate": 100.0,
-            "conv_from": 111111,
-            "conv_to": 111111,
-            "is_visible": False,
-        }
+    snapshot = DailyMetricsSnapshot(
+        rows=tuple(rows),
+        portfolio_issues=portfolio_issues,
     )
-    return rows
-
-
-def _mock_fetch_with_missing_revenue(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    rows[1]["revenue_total"] = None
-    return rows
-
-
-def _mock_fetch_with_changed_rounded_rates(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    rows[0]["conv_rate"] = 99.99
-    rows[1]["conv_rate"] = 0.01
-    return rows
-
-
-def _mock_fetch_with_missing_conversion_count(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    rows[1]["conv_from"] = None
-    return rows
-
-
-def _mock_fetch_with_multiple_missing_fields(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    rows[0]["arr_total"] = None
-    rows[0]["revenue_per_day"] = None
-    rows[0]["conv_rate"] = None
-    rows[0]["conv_to"] = None
-    return rows
-
-
-def _mock_fetch_with_zero_values(*_args, **_kwargs):
-    rows = _mock_fetch_all_metrics()
-    numeric_fields = (
-        "mrr_total",
-        "mrr_delta_24h",
-        "arr_total",
-        "arr_delta_24h",
-        "revenue_total",
-        "revenue_per_day",
-        "installs_total",
-        "installs_delta_24h",
-        "conv_rate",
-        "conv_from",
-        "conv_to",
-    )
-    for row in rows:
-        for field in numeric_fields:
-            row[field] = 0
-    return rows
-
-
-def _mock_fetch_august_6_after_backfill(*_args, **_kwargs):
-    return [
-        {
-            "index": 0,
-            "name": "Unfollowers: Follow & Unfollow",
-            "mrr_total": 1272.866100428855,
-            "mrr_delta_24h": -104.63,
-            "arr_total": 15274.393205146269,
-            "arr_delta_24h": -1255.53,
-            "revenue_total": 262.9883818251301,
-            "revenue_per_day": 11.90,
-            "installs_total": 1793,
-            "installs_delta_24h": 321,
-            "conv_rate": 0.8365867261572784,
-            "conv_from": 1793,
-            "conv_to": 15,
-            "is_visible": True,
-        }
-    ]
+    with patch("report_builder.fetch_daily_snapshot", return_value=snapshot):
+        return build_report(date(2026, 8, 6))
 
 
 class TestReportBuilder(unittest.TestCase):
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_report_contains_total_section(self, _mock_fetch):
-        from report_builder import build_report_text
+    def test_complete_report_has_canonical_totals_and_passed_marker(self):
+        result = build_with_rows(valid_rows())
 
-        text = build_report_text()
-        self.assertIn("<b>Total</b>", text)
-        self.assertIn("Total MRR", text)
-        self.assertIn("Total Downloads", text)
+        self.assertIn("<b>Unfollowers: Follow &amp; Unfollow</b>", result.text)
+        self.assertIn("<b>Granny Photos</b>", result.text)
+        self.assertIn("<b>Otty: Couples&amp;Relationships</b>", result.text)
+        self.assertIn("Total MRR (на дату): $600 (+$6)", result.text)
+        self.assertIn("Total ARR (на дату): $7,200 (+$72)", result.text)
+        self.assertIn("Total Revenue (месяц): $600 (+$60)", result.text)
+        self.assertIn("Total Downloads (за сутки): (+600)", result.text)
+        self.assertIn("Total Conv. (месяц): 1.00%", result.text)
+        self.assertIn("✅ Проверка данных: пройдена", result.text)
+        self.assertEqual(result.integrity_problem_count, 0)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_report_does_not_include_legacy_explainer_text(self, _mock_fetch):
-        from report_builder import build_report_text
+    def test_partial_report_shows_problem_count_and_na(self):
+        rows = valid_rows()
+        rows[2]["revenue_total"] = None
+        rows[2]["issues"] = (IntegrityIssue(
+            code="revenue.invalid",
+            message="Revenue response is invalid",
+            app_name=CANONICAL_APP_NAMES[2],
+            metric="revenue_total",
+        ),)
 
-        text = build_report_text()
-        self.assertNotIn("MRR, ARR — на дату", text)
-        self.assertNotIn("Revenue, Installs, Conv — за месяц", text)
+        result = build_with_rows(rows)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_total_mrr_is_sum_of_current_mrr(self, _mock_fetch):
-        from report_builder import build_report_text
+        self.assertIn("Revenue (месяц): $N/A (+$30)", result.text)
+        self.assertIn("Total Revenue (месяц): $N/A (+$60)", result.text)
+        self.assertIn("⚠️ Проверка данных: обнаружено 1 проблем", result.text)
+        self.assertIn("Total MRR (на дату): $600", result.text)
+        self.assertEqual(result.integrity_problem_count, 1)
 
-        text = build_report_text()
-        # 1000.5 + 2000 = 3000.5 → формат $3,000.50
-        self.assertIn("3,000.50", text)
+    def test_missing_mrr_value_quarantines_only_current_total(self):
+        rows = valid_rows()
+        rows[2]["mrr_total"] = None
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_total_mrr_delta_in_parentheses(self, _mock_fetch):
-        from report_builder import build_report_text
+        text = build_with_rows(rows).text
 
-        text = build_report_text()
-        # 50.25 + (-10.5) = 39.75 → (+$39.75)
-        self.assertIn("+$39.75", text)
+        self.assertIn("MRR (на дату): $N/A (+$3)", text)
+        self.assertIn("Total MRR (на дату): $N/A (+$6)", text)
+        self.assertIn("Total Revenue (месяц): $600", text)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_negative_mrr_delta_sign_before_currency(self, _mock_fetch):
-        from report_builder import build_report_text
+    def test_missing_mrr_delta_preserves_current_value(self):
+        rows = valid_rows()
+        rows[2]["mrr_delta_24h"] = None
 
-        text = build_report_text()
-        # Для отрицательной дельты формат должен быть (-$10.50), а не ($-10.50)
-        self.assertIn("(-$10.50)", text)
-        self.assertNotIn("($-10.50)", text)
+        text = build_with_rows(rows).text
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_total_downloads_is_sum_of_deltas(self, _mock_fetch):
-        from report_builder import build_report_text
+        self.assertIn("MRR (на дату): $300 (⚠️ N/A)", text)
+        self.assertIn("Total MRR (на дату): $600 (⚠️ N/A)", text)
 
-        text = build_report_text()
-        # 120 + 80 = 200 → (+200)
-        self.assertIn("+200", text)
+    def test_missing_conversion_counts_make_total_conversion_na(self):
+        rows = valid_rows()
+        rows[2].update(conv_rate=None, conv_from=None, conv_to=None)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_app_blocks_present(self, _mock_fetch):
-        from report_builder import build_report_text
+        self.assertIn("Total Conv. (месяц): N/A", build_with_rows(rows).text)
 
-        text = build_report_text()
-        self.assertIn("<b>App One</b>", text)
-        self.assertIn("<b>App Two</b>", text)
-        self.assertIn("💰 MRR", text)
-        self.assertIn("📲 Installs", text)
+    def test_zero_conversion_counts_render_zero(self):
+        rows = valid_rows()
+        for row in rows:
+            row.update(conv_rate=0.0, conv_from=0, conv_to=0)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_report_uses_provided_report_date_in_header(self, _mock_fetch):
-        from report_builder import build_report_text
+        self.assertIn("Total Conv. (месяц): 0.00%", build_with_rows(rows).text)
 
-        text = build_report_text(report_date=date(2026, 2, 14))
-        self.assertIn("📊 Отчёт на 14.02.2026", text)
+    def test_total_conversion_uses_raw_counts_not_displayed_rates(self):
+        rows = valid_rows()
+        rows[0]["conv_rate"] = 99.99
+        rows[1]["conv_rate"] = 0.01
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics_with_anomaly)
-    def test_anomaly_banner_present_when_detected(self, _mock_fetch):
-        from report_builder import build_report_text
+        self.assertIn("Total Conv. (месяц): 1.00%", build_with_rows(rows).text)
 
-        text = build_report_text(report_date=date(2026, 2, 14))
-        self.assertIn("Обнаружены аномалии в данных", text)
+    def test_portfolio_only_issue_preserves_values_but_warns(self):
+        issue = IntegrityIssue(code="config.extra_slot", message="APP4 ignored")
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_with_hidden_app)
-    def test_hidden_rows_are_excluded_from_every_total(self, _mock_fetch):
-        from report_builder import build_report_text
+        result = build_with_rows(valid_rows(), portfolio_issues=(issue,))
 
-        text = build_report_text(report_date=date(2026, 8, 6))
+        self.assertIn("Total MRR (на дату): $600", result.text)
+        self.assertIn("⚠️ Проверка данных: обнаружено 1 проблем", result.text)
+        self.assertIn("APP4 ignored", result.text)
 
-        self.assertNotIn("Hidden Portfolio App", text)
-        self.assertIn("Total MRR (на дату): $3,000.50 (+$39.75)", text)
-        self.assertIn("Total ARR (на дату): $36,006 (+$477)", text)
-        self.assertIn("Total Revenue (месяц): $500 (+$60)", text)
-        self.assertIn("Total Downloads (за сутки): (+200)", text)
-        self.assertIn("Total Conv. (месяц): 1.12%", text)
-        self.assertNotIn("999,999", text)
-        self.assertNotIn("222,422", text)
+    def test_issue_details_are_html_escaped(self):
+        rows = valid_rows()
+        rows[0]["issues"] = (IntegrityIssue(
+            code="fetch.failed",
+            message="Revenue <invalid> & unavailable",
+            app_name=CANONICAL_APP_NAMES[0],
+            metric="revenue_total",
+        ),)
 
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
-    def test_total_conversion_uses_summed_raw_counts(self, _mock_fetch):
-        from report_builder import build_report_text
+        text = build_with_rows(rows).text
 
-        text = build_report_text(report_date=date(2026, 8, 6))
+        self.assertIn("Revenue &lt;invalid&gt; &amp; unavailable", text)
+        self.assertNotIn("Revenue <invalid>", text)
 
-        self.assertIn("Total Conv. (месяц): 1.12%", text)
+    def test_report_uses_provided_date_in_header(self):
+        result = build_with_rows(valid_rows())
+        self.assertIn("📊 Отчёт на 06.08.2026", result.text)
 
-    @patch(
-        "report_builder.fetch_all_metrics",
-        side_effect=_mock_fetch_with_changed_rounded_rates,
-    )
-    def test_total_conversion_does_not_use_displayed_app_rates(self, _mock_fetch):
-        from report_builder import build_report_text
+    def test_audit_records_statuses_without_metric_values(self):
+        with self.assertLogs("daily_metric_integrity", level="INFO") as captured:
+            build_with_rows(valid_rows())
 
-        text = build_report_text(report_date=date(2026, 8, 6))
-
-        self.assertIn("Total Conv. (месяц): 1.12%", text)
-
-    @patch(
-        "report_builder.fetch_all_metrics",
-        side_effect=_mock_fetch_with_missing_conversion_count,
-    )
-    def test_missing_conversion_count_makes_total_conversion_na(self, _mock_fetch):
-        from report_builder import build_report_text
-
-        text = build_report_text(report_date=date(2026, 8, 6))
-
-        self.assertIn("Total Conv. (месяц): N/A", text)
-
-    @patch(
-        "report_builder.fetch_all_metrics", side_effect=_mock_fetch_with_missing_revenue
-    )
-    def test_missing_visible_metric_makes_only_its_total_na(self, _mock_fetch):
-        from report_builder import build_report_text
-
-        text = build_report_text(report_date=date(2026, 8, 6))
-
-        self.assertIn("Total MRR (на дату): $3,000.50", text)
-        self.assertIn("Total Revenue (месяц): $N/A (+$60)", text)
-
-    @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_with_zero_values)
-    def test_zero_is_valid_and_is_not_rendered_as_missing(self, _mock_fetch):
-        from report_builder import build_report
-
-        result = build_report(report_date=date(2026, 8, 6))
-
-        self.assertNotIn("Некоторые данные недоступны", result.text)
-        self.assertIn("Total MRR (на дату): $0 (+$0)", result.text)
-        self.assertIn("Total Revenue (месяц): $0 (+$0)", result.text)
-        self.assertIn("Total Downloads (за сутки): (+0)", result.text)
-        self.assertIn("Total Conv. (месяц): N/A", result.text)
-        self.assertEqual(result.anomalies, [])
-
-    @patch(
-        "report_builder.fetch_all_metrics",
-        side_effect=_mock_fetch_with_multiple_missing_fields,
-    )
-    def test_anomalies_name_every_missing_metric_family(self, _mock_fetch):
-        from report_builder import build_report
-
-        result = build_report(report_date=date(2026, 8, 6))
-        anomaly_text = "\n".join(result.anomalies)
-
-        self.assertIn("App One", anomaly_text)
-        self.assertIn("ARR", anomaly_text)
-        self.assertIn("Revenue day", anomaly_text)
-        self.assertIn("Conversion", anomaly_text)
-        self.assertIn("Conversion paid", anomaly_text)
-
-    @patch(
-        "report_builder.fetch_all_metrics",
-        side_effect=_mock_fetch_with_multiple_missing_fields,
-    )
-    def test_report_renders_application_and_missing_metric_details(self, _mock_fetch):
-        from report_builder import build_report
-
-        result = build_report(report_date=date(2026, 8, 6))
-
-        self.assertIn("• App One: отсутствуют поля", result.text)
-        self.assertIn("Revenue day", result.text)
-        self.assertIn("Conversion paid", result.text)
-
-    @patch(
-        "report_builder.fetch_all_metrics",
-        side_effect=_mock_fetch_august_6_after_backfill,
-    )
-    def test_august_6_snapshot_accepts_late_install_backfill(self, _mock_fetch):
-        from report_builder import build_report_text
-
-        text = build_report_text(report_date=date(2026, 8, 6))
-
-        self.assertIn("Installs (месяц): 1,793 (+321)", text)
-        self.assertIn("Conv. Install→Paid (месяц): 0.84%", text)
-        self.assertIn("Total Downloads (за сутки): (+321)", text)
-        self.assertNotIn("1,784", text)
+        output = "\n".join(captured.output)
+        self.assertIn("app=Granny Photos metric=mrr_total status=valid", output)
+        self.assertIn("total_metric=conversion status=valid", output)
+        self.assertNotIn("metric=mrr_total value=", output)
 
 
 if __name__ == "__main__":
