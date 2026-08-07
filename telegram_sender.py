@@ -2,8 +2,9 @@
 Отправка сообщений в Telegram (сводный отчёт и тестовое сообщение).
 """
 import logging
+from html import escape
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -66,7 +67,28 @@ def test_send() -> bool:
     if not send_message(text):
         return False
     send_followup_reports(report.report_date)
+    send_integrity_alert(report)
     return True
+
+
+def send_integrity_alert(report: Any) -> bool:
+    """Send secret-free validation details to the configured admin, if needed."""
+    if not getattr(report, "integrity_problem_count", 0):
+        return False
+    admin_id = get_telegram_admin_id()
+    if not admin_id:
+        return False
+    details = "\n".join(
+        f"• {escape(str(anomaly))}"
+        for anomaly in getattr(report, "anomalies", ())[:20]
+    )
+    alert = (
+        f"⚠️ Проверка данных отчёта за {report.report_date.strftime('%d.%m.%Y')}: "
+        f"{report.integrity_problem_count} проблем"
+    )
+    if details:
+        alert += f"\n\n{details}"
+    return send_message(alert, chat_id=admin_id)
 
 
 def send_ab_report_once(report_date: Optional[date] = None) -> bool:
