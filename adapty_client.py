@@ -5,6 +5,7 @@ API: POST /api/v1/client-api/metrics/analytics/ (api-admin.adapty.io)
 """
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
@@ -22,6 +23,79 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ChartMetric:
+    """Summary and daily series returned by one Adapty analytics chart."""
+
+    value: float
+    daily_values: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ConversionMetric:
+    """Install-to-paid percentage together with its reconciliation counts."""
+
+    value: float
+    value_from: int
+    value_to: int
+
+
+def _metric_key(chart_id: str) -> str:
+    """Map a Dashboard-compatible chart to its gross Export API series."""
+    if chart_id in {"mrr", "arr", "revenue"}:
+        return "revenue"
+    if chart_id == "installs":
+        return "common"
+    raise ValueError(f"Unsupported Adapty chart: {chart_id}")
+
+
+def _parse_chart_metric(
+    payload: dict[str, Any], chart_id: str
+) -> Optional[ChartMetric]:
+    """Parse the summary and daily points without falling back to net proceeds."""
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    metric = data.get(_metric_key(chart_id))
+    if not isinstance(metric, dict):
+        return None
+    try:
+        value = float(metric["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    daily_values: list[float] = []
+    series = metric.get("data")
+    if isinstance(series, list) and series:
+        first_series = series[0]
+        if not isinstance(first_series, dict):
+            return None
+        values = first_series.get("values")
+        if not isinstance(values, list):
+            return None
+        for point in values:
+            try:
+                daily_values.append(float(point["y"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+    return ChartMetric(value=value, daily_values=tuple(daily_values))
+
+
+def _parse_conversion_metric(payload: dict[str, Any]) -> Optional[ConversionMetric]:
+    """Parse Adapty's percentage and the raw counts used to calculate it."""
+    if payload.get("metric_name") != "install_paid":
+        return None
+    try:
+        value = float(payload["value"])
+        value_from = int(payload["value_from"])
+        value_to = int(payload["value_to"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if value_from < 0 or value_to < 0 or value_to > value_from:
+        return None
+    return ConversionMetric(value=value, value_from=value_from, value_to=value_to)
 
 
 def _get_session() -> requests.Session:
@@ -53,10 +127,10 @@ def _fetch_chart(
     chart_id: str,
     date_from: datetime,
     date_to: datetime,
-) -> Union[float, int, None]:
+) -> Optional[ChartMetric]:
     """
-    Один запрос к Adapty за одну метрику (mrr или installs).
-    Возвращает значение value из ответа или None при ошибке.
+    Один запрос к Adapty за одну метрику.
+    Возвращает summary и дневной ряд или None при ошибке.
     Для периодов > 365 дней API требует period_unit=month (daily нельзя).
     """
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -93,75 +167,15 @@ def _fetch_chart(
         logger.exception("Adapty API invalid JSON (chart_id=%s): %s", chart_id, e)
         return None
 
-    # Парсим значение метрики. Реальный ответ Adapty:
-    # - MRR: data.revenue.value (или legacy data.gross_revenue.value), не data.mrr!
-    # - Installs: data.<ключ>.value (уточняется по ответу)
-    # При длинном периоде API возвращает data.*.data = [ {date, value}, ... ] — берём последнюю точку (конец периода).
-    data_obj = data.get("data") or {}
-    if not isinstance(data_obj, dict):
-        return None
-
-    def _value_from_metric(metric: dict, as_float: bool) -> Union[float, int, None]:
-        """Берёт value из metric.value или из последней точки metric.data (конец периода)."""
-        val = metric.get("value")
-        if val is not None:
-            try:
-                return float(val) if as_float else int(float(val))
-            except (TypeError, ValueError):
-                pass
-        arr = metric.get("data")
-        if isinstance(arr, list) and arr:
-            # Для периода в несколько дней API возвращает массив по дням — нужна последняя точка
-            last_point = arr[-1] if isinstance(arr[-1], dict) else None
-            if last_point is not None:
-                val = last_point.get("value")
-                if val is not None:
-                    try:
-                        return float(val) if as_float else int(float(val))
-                    except (TypeError, ValueError):
-                        pass
-        return None
-
-    # Для MRR и ARR берём выручку как в дашборде (revenue / gross_revenue).
-    # proceeds — это выручка после комиссий, она заметно ниже и не совпадает с карточкой MRR.
-    if chart_id in ("mrr", "arr"):
-        for key in ("revenue", "gross_revenue", "proceeds", "mrr", "arr"):
-            metric = data_obj.get(key)
-            if metric is not None and isinstance(metric, dict):
-                val = _value_from_metric(metric, as_float=True)
-                if val is not None:
-                    return float(val)
+    metric = _parse_chart_metric(data, chart_id)
+    if metric is None:
+        data_obj = data.get("data")
         logger.warning(
-            "Adapty API: метрика MRR/revenue не найдена, keys=%s", list(data_obj.keys())
+            "Adapty API: gross metric not found for chart_id=%s, data keys=%s",
+            chart_id,
+            list(data_obj.keys()) if isinstance(data_obj, dict) else [],
         )
-        return None
-
-    elif chart_id == "revenue":
-        for key in ("revenue", "gross_revenue", "proceeds"):
-            metric = data_obj.get(key)
-            if metric is not None and isinstance(metric, dict):
-                val = _value_from_metric(metric, as_float=True)
-                if val is not None:
-                    return float(val)
-        logger.warning(
-            "Adapty API: метрика revenue не найдена, keys=%s", list(data_obj.keys())
-        )
-        return None
-
-    # Installs: API возвращает data.common.value (не data.installs!)
-    for key in ("common", chart_id, "installs", "new_installs"):
-        metric = data_obj.get(key)
-        if metric is not None and isinstance(metric, dict):
-            val = _value_from_metric(metric, as_float=False)
-            if val is not None:
-                return int(val)
-
-    logger.warning(
-        "Adapty API: метрика не найдена для chart_id=%s, data keys=%s",
-        chart_id,
-        list(data_obj.keys()),
-    )
-    return None
+    return metric
 
 
 def _fetch_conversion(
@@ -171,10 +185,10 @@ def _fetch_conversion(
     timezone: str,
     date_from: datetime,
     date_to: datetime,
-) -> Optional[float]:
+) -> Optional[ConversionMetric]:
     """
     Запрашивает когортную конверсию Install → Paid через Adapty Conversion API.
-    Возвращает значение конверсии (процент 0–100 или доля 0–1) как float или None при ошибке.
+    Возвращает процент и raw counts либо None при ошибке.
     """
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     headers = {
@@ -209,57 +223,10 @@ def _fetch_conversion(
         logger.exception("Adapty Conversion API invalid JSON: %s", e)
         return None
 
-    # Извлекаем значение конверсии из data (процент или доля)
-    # API может вернуть data как массив [{value: X}] или объект {value: X}; также value на корне
-    data_obj = data.get("data")
-    root_value = data.get("value")
-    if root_value is not None and isinstance(root_value, (int, float)):
-        try:
-            return float(root_value)
-        except (TypeError, ValueError):
-            pass
-
-    if data_obj is None:
-        return None
-
-    def _extract_float(obj: Any) -> Optional[float]:
-        if obj is None:
-            return None
-        if isinstance(obj, (int, float)):
-            try:
-                return float(obj)
-            except (TypeError, ValueError):
-                return None
-        if isinstance(obj, dict):
-            for key in ("value", "conversion", "rate", "percentage", "conv"):
-                val = obj.get(key)
-                if val is not None and isinstance(val, (int, float)):
-                    try:
-                        return float(val)
-                    except (TypeError, ValueError):
-                        pass
-            # data может содержать массив по периодам — берём последнее/среднее
-            arr = obj.get("data")
-            if isinstance(arr, list) and arr:
-                last = arr[-1] if isinstance(arr[-1], dict) else None
-                if last:
-                    return _extract_float(last.get("value") or last.get("y"))
-        if isinstance(obj, list) and obj:
-            return _extract_float(obj[-1])
-        return None
-
-    # data может быть массивом периодов [{value, ...}, ...]
-    result = _extract_float(data_obj)
-    if result is not None:
-        # Если API вернул долю (0–1), приводим к проценту (0–100)
-        if 0 <= result <= 1:
-            result = result * 100
-        return float(result)
-    logger.warning(
-        "Adapty Conversion API: значение конверсии не найдено, data keys=%s",
-        list(data_obj.keys()) if isinstance(data_obj, dict) else type(data_obj),
-    )
-    return None
+    metric = _parse_conversion_metric(data)
+    if metric is None:
+        logger.warning("Adapty Conversion API: incomplete install_paid response")
+    return metric
 
 
 def _debug_conversion_response() -> None:
@@ -288,7 +255,10 @@ def _debug_conversion_response() -> None:
     print(f"Period: {date_from.date()} — {date_to.date()}")
     print()
     conv = _fetch_conversion(app.api_key, base_url, path, tz_str, date_from, date_to)
-    print(f"Parsed conversion: {f'{conv:.2f}%' if conv is not None else 'N/A'}")
+    print(
+        "Parsed conversion: "
+        f"{f'{conv.value:.2f}% ({conv.value_to}/{conv.value_from})' if conv is not None else 'N/A'}"
+    )
     print()
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     headers = {
