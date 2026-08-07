@@ -7,7 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
 import requests
@@ -355,101 +355,100 @@ def _debug_adapty_response() -> None:
         print()
 
 
-def fetch_metrics_for_app(
-    api_key: str,
+def _last_value(metric: Optional[ChartMetric]) -> Optional[float]:
+    """Return the final daily point, preserving a numeric zero."""
+    if metric is None or not metric.daily_values:
+        return None
+    return metric.daily_values[-1]
+
+
+def _last_delta(metric: Optional[ChartMetric]) -> Optional[float]:
+    """Return the difference between the final two daily points."""
+    if metric is None or len(metric.daily_values) < 2:
+        return None
+    return metric.daily_values[-1] - metric.daily_values[-2]
+
+
+def _fetch_app_snapshot(
+    *,
+    app_index: int,
+    app_key: str,
+    app_name: str,
+    is_visible: bool,
     base_url: str,
-    path: str,
+    analytics_path: str,
+    conversion_path: str,
     timezone: str,
-    date_from: datetime,
-    date_to: datetime,
-    conversion_path: Optional[str] = None,
-) -> dict[str, Union[float, int, None]]:
-    """
-    Четыре запроса к Adapty (mrr + installs + revenue + arr) и конверсия Install→Paid.
-    Возвращает dict с ключами mrr, installs, revenue, arr, install_to_paid_conv.
-    Значения могут быть None при ошибке запроса.
-    """
-    mrr = _fetch_chart(api_key, base_url, path, timezone, "mrr", date_from, date_to)
-    installs = _fetch_chart(
-        api_key, base_url, path, timezone, "installs", date_from, date_to
+    month_start: datetime,
+    previous_date: datetime,
+    report_date: datetime,
+) -> dict[str, Any]:
+    """Collect one internally consistent five-response application snapshot."""
+    mrr = _fetch_chart(
+        app_key,
+        base_url,
+        analytics_path,
+        timezone,
+        "mrr",
+        previous_date,
+        report_date,
+    )
+    arr = _fetch_chart(
+        app_key,
+        base_url,
+        analytics_path,
+        timezone,
+        "arr",
+        previous_date,
+        report_date,
     )
     revenue = _fetch_chart(
-        api_key, base_url, path, timezone, "revenue", date_from, date_to
+        app_key,
+        base_url,
+        analytics_path,
+        timezone,
+        "revenue",
+        month_start,
+        report_date,
     )
-    arr = _fetch_chart(api_key, base_url, path, timezone, "arr", date_from, date_to)
-    install_to_paid_conv = None
-    if conversion_path:
-        install_to_paid_conv = _fetch_conversion(
-            api_key, base_url, conversion_path, timezone, date_from, date_to
-        )
+    installs = _fetch_chart(
+        app_key,
+        base_url,
+        analytics_path,
+        timezone,
+        "installs",
+        month_start,
+        report_date,
+    )
+    conversion = _fetch_conversion(
+        app_key,
+        base_url,
+        conversion_path,
+        timezone,
+        month_start,
+        report_date,
+    )
+
+    installs_total = int(installs.value) if installs is not None else None
+    installs_today = _last_value(installs)
     return {
-        "mrr": mrr,
-        "installs": installs,
-        "revenue": revenue,
-        "arr": arr,
-        "install_to_paid_conv": install_to_paid_conv,
+        "index": app_index,
+        "name": app_name,
+        "mrr_total": _last_value(mrr),
+        "mrr_delta_24h": _last_delta(mrr),
+        "installs_total": installs_total,
+        "installs_delta_24h": (
+            int(installs_today) if installs_today is not None else None
+        ),
+        "revenue_total": revenue.value if revenue is not None else None,
+        "revenue_per_day": _last_value(revenue),
+        "arr_total": _last_value(arr),
+        "arr_delta_24h": _last_delta(arr),
+        "conv_rate": conversion.value if conversion is not None else None,
+        "conv_from": conversion.value_from if conversion is not None else None,
+        "conv_to": conversion.value_to if conversion is not None else None,
+        "is_visible": is_visible,
     }
-
-
-def _fetch_revenue_metric_last_two_days(
-    api_key: str,
-    base_url: str,
-    path: str,
-    timezone: str,
-    date_yesterday: datetime,
-    date_today: datetime,
-    chart_id: str = "mrr",
-) -> Tuple[Union[float, None], Union[float, None]]:
-    """
-    Запрашивает метрику выручки (MRR или ARR) за (вчера, сегодня) в календарных днях (в timezone отчёта).
-    Возвращает (yesterday, today) по последним двум точкам data[0].values.
-    При ошибке возвращает (None, None).
-    Так дельта совпадает с дашбордом Adapty (5 фев = 307.07, 6 фев = 348.2).
-    """
-    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json",
-        "Adapty-Tz": timezone,
-    }
-    body = {
-        "chart_id": chart_id,
-        "filters": {
-            "date": [date_yesterday.strftime("%Y-%m-%d"), date_today.strftime("%Y-%m-%d")],
-        },
-        "period_unit": "day",
-        "format": "json",
-    }
-    try:
-        session = _get_session()
-        resp = session.post(url, json=body, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except (requests.RequestException, ValueError) as e:
-        logger.warning("%s two-day request failed: %s", chart_id, e)
-        return None, None
-
-    data_obj = data.get("data") or {}
-    for key in ("revenue", "gross_revenue", "proceeds", "mrr", "arr"):
-        metric = data_obj.get(key)
-        if not metric or not isinstance(metric, dict):
-            continue
-        arr = metric.get("data")
-        if not isinstance(arr, list) or not arr:
-            continue
-        first = arr[0]
-        if not isinstance(first, dict):
-            continue
-        values = first.get("values")
-        if not isinstance(values, list) or len(values) < 1:
-            continue
-        try:
-            y_today = float(values[-1].get("y", 0))
-            y_yesterday = float(values[-2].get("y", 0)) if len(values) >= 2 else 0.0
-            return y_yesterday, y_today
-        except (TypeError, ValueError):
-            continue
-    return None, None
 
 
 def fetch_all_metrics(
@@ -458,10 +457,10 @@ def fetch_all_metrics(
     """
     Собирает метрики по всем приложениям параллельно.
     По умолчанию строит отчёт за текущий день (в timezone данных Adapty).
-    - MRR и Installs: за текущий месяц до report_date включительно.
-    - Дельта MRR: report_date-1 vs report_date (календарные дни в timezone отчёта).
-    - Установки «за сутки»: installs за report_date.
-    Возвращает: name, mrr_total, mrr_delta_24h, installs_total, installs_delta_24h.
+    - MRR и ARR: текущая точка и дельта из одного двухдневного ряда.
+    - Revenue и Installs: MTD summary и последний дневной point одного ответа.
+    - Conversion: процент и raw counts одного MTD ответа.
+    Возвращает полный снимок для построителя отчёта.
     """
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
@@ -492,67 +491,22 @@ def fetch_all_metrics(
 
     results: list[dict[str, Any]] = []
 
-    def job(app_index: int, app_key: str, app_name: str, is_visible: bool) -> dict[str, Any]:
-        # Метрики за месяц (MRR на конец периода, installs — сумма за месяц)
-        month_data = fetch_metrics_for_app(
-            app_key,
-            base_url,
-            path,
-            tz_str,
-            date_start_month,
-            date_target,
+    def job(
+        app_index: int, app_key: str, app_name: str, is_visible: bool
+    ) -> dict[str, Any]:
+        return _fetch_app_snapshot(
+            app_index=app_index,
+            app_key=app_key,
+            app_name=app_name,
+            is_visible=is_visible,
+            base_url=base_url,
+            analytics_path=path,
             conversion_path=conversion_path,
+            timezone=tz_str,
+            month_start=date_start_month,
+            previous_date=date_prev,
+            report_date=date_target,
         )
-        mrr_month = month_data.get("mrr")
-        inst_month = month_data.get("installs")
-        revenue_month = month_data.get("revenue")
-        arr_total = month_data.get("arr")
-        conv_rate = month_data.get("install_to_paid_conv")
-
-        # Дельта MRR за сутки: предыдущий закрытый день vs report_date.
-        mrr_yesterday, mrr_today = _fetch_revenue_metric_last_two_days(
-            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="mrr"
-        )
-        if mrr_today is not None and mrr_yesterday is not None:
-            mrr_delta_24h = float(mrr_today) - float(mrr_yesterday)
-        else:
-            mrr_delta_24h = None
-
-        # Дельта ARR за сутки
-        arr_yesterday, arr_today = _fetch_revenue_metric_last_two_days(
-            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="arr"
-        )
-        if arr_today is not None and arr_yesterday is not None:
-            arr_delta_24h = float(arr_today) - float(arr_yesterday)
-        else:
-            arr_delta_24h = None
-
-        # Revenue за сутки (выручка за report_date)
-        _, rev_today = _fetch_revenue_metric_last_two_days(
-            app_key, base_url, path, tz_str, date_prev, date_target, chart_id="revenue"
-        )
-        revenue_per_day = float(rev_today) if rev_today is not None else None
-
-        # Установки за report_date: один календарный день.
-        inst_today = _fetch_chart(
-            app_key, base_url, path, tz_str, "installs", date_target, date_target
-        )
-        inst_delta_24h = int(inst_today) if inst_today is not None else None
-
-        return {
-            "index": app_index,
-            "name": app_name,
-            "mrr_total": mrr_month,
-            "mrr_delta_24h": mrr_delta_24h,
-            "installs_total": inst_month,
-            "installs_delta_24h": inst_delta_24h,
-            "revenue_total": revenue_month,
-            "revenue_per_day": revenue_per_day,
-            "arr_total": arr_total,
-            "arr_delta_24h": arr_delta_24h,
-            "conv_rate": conv_rate,
-            "is_visible": is_visible,
-        }
 
     with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:
         futures = {
@@ -578,6 +532,8 @@ def fetch_all_metrics(
                         "arr_total": None,
                         "arr_delta_24h": None,
                         "conv_rate": None,
+                        "conv_from": None,
+                        "conv_to": None,
                         "is_visible": apps[idx].is_visible,
                     }
                 )
