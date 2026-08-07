@@ -130,7 +130,8 @@ python main.py --send-ab-report
    - `TELEGRAM_CHAT_ID`
    - `ADAPTY_API_KEY_APP1`, `ADAPTY_APP_NAME_1`
    - `ADAPTY_API_KEY_APP2`, `ADAPTY_APP_NAME_2`
-  - При необходимости: `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
+   - `ADAPTY_API_KEY_APP3`, `ADAPTY_APP_NAME_3`
+   - При необходимости: `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
    - Для Apple Ads-only отчёта при его использовании: `ADAPTY_DASHBOARD_TOKEN`,
      `ADAPTY_DASHBOARD_COMPANY_ID`, `ADAPTY_DASHBOARD_APP_ID`
 
@@ -142,16 +143,50 @@ python main.py --send-ab-report
 
 Сервис не поднимает HTTP-сервер. Проверка конфига локально: `python main.py --health`. На Railway можно не настраивать health check или использовать встроенные проверки процесса.
 
-### Добавление третьего (и более) приложения
+### Состав приложений production-отчёта
 
-Добавьте в переменные окружения:
-- `ADAPTY_API_KEY_APP3`, `ADAPTY_APP_NAME_3`
-Код подхватит их автоматически.
+Production использует три последовательных слота, и все они видны в отчёте:
+
+- `APP1` — `Unfollowers: Follow & Unfollow`;
+- `APP2` — `Granny Photos`;
+- `APP3` — `Otty: Couples&Relationships`.
+
+Не добавляйте скрытые портфельные приложения в следующие слоты: каждый вклад в
+`Total` должен быть виден отдельной строкой в том же сообщении.
+
+## Определения метрик и сверка с Adapty
+
+Сравнивайте Telegram и Dashboard только на одном снимке и с одинаковыми
+фильтрами: timezone `Europe/Minsk` (`GMT+3`), тот же диапазон дат, три приложения
+выше и настройка installs `Count installs as new device_ids`.
+
+- **MRR** и **ARR** берутся из gross-серии `data.revenue`. Значение — последняя
+  дневная точка на дату отчёта, дельта — разность последних двух дневных точек.
+  ARR приходит из Adapty и не вычисляется как `MRR × 12`.
+- **Revenue** — `data.revenue.value` с первого дня месяца по дату отчёта;
+  значение в скобках — последняя дневная точка того же ответа.
+- **Installs** — `data.common.value` за месяц; значение в скобках — последняя
+  дневная точка того же ответа.
+- **Install→Paid** — процент Adapty за месяц. Итоговая конверсия считается как
+  `sum(value_to) / sum(value_from) × 100` по трём приложениям, а не как среднее
+  или средневзвешенное округлённых процентов строк.
+
+Если у видимого приложения отсутствует значение или raw counts конверсии,
+соответствующий итог показывает `N/A`, а не неполную сумму. Числовой ноль
+остаётся валидным значением.
+
+Adapty может позднее дозаполнять установки и конверсии пользователей. Поэтому
+старое Telegram-сообщение является снимком на момент отправки, а сегодняшний
+Dashboard может показывать другое значение для той же исторической даты.
+Расхождение считается объяснённым backfill только когда текущие Export API и
+Dashboard совпадают между собой на одном снимке.
 
 ## Формат отчёта
 
 - Заголовок: 📊 Отчёт на ДД.ММ.ГГГГ
-- По каждому приложению: жирное название, 💰 MRR: $X,XXX (±$YY), 📲 Installs: X,XXX (±ZZ).
+- По каждому приложению: жирное название, MRR, Revenue, Installs и Install→Paid.
+- В `Total`: MRR, ARR, Revenue, дневные Downloads и raw-count Install→Paid по
+  тем же видимым приложениям.
 - Сообщения отправляются с Telegram parse mode `HTML`; A/B-заголовки используют `<b>…</b>`.
 
 ## Adapty API
