@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import requests
@@ -22,6 +22,13 @@ from config import (
     get_adapty_analytics_path,
     get_adapty_conversion_path,
     get_adapty_timezone,
+)
+from daily_metric_integrity import REPORT_VALUE_FIELDS, validate_app_metrics
+from daily_report_contract import (
+    DailyAppSlot,
+    DailyMetricsSnapshot,
+    IntegrityIssue,
+    load_daily_portfolio,
 )
 
 logger = logging.getLogger(__name__)
@@ -554,18 +561,36 @@ def _fetch_app_snapshot(
     }
 
 
-def fetch_all_metrics(
+def _missing_app_row(
+    slot: DailyAppSlot,
+    issues: Sequence[IntegrityIssue],
+) -> dict[str, Any]:
+    relevant_issues = tuple(
+        issue
+        for issue in issues
+        if issue.app_name == slot.name
+    )
+    return {
+        "index": slot.index,
+        "name": slot.name,
+        **{field: None for field in REPORT_VALUE_FIELDS},
+        "issues": relevant_issues,
+        "is_visible": True,
+    }
+
+
+def fetch_daily_snapshot(
     report_date: Union[date, datetime, None] = None,
-) -> list[dict[str, Any]]:
+) -> DailyMetricsSnapshot:
     """
-    Собирает метрики по всем приложениям параллельно.
+    Собирает метрики только по трём каноническим приложениям параллельно.
     По умолчанию строит отчёт за текущий день (в timezone данных Adapty).
     - MRR и ARR: текущая точка и дельта из одного двухдневного ряда.
     - Revenue и Installs: MTD summary и последний дневной point одного ответа.
     - Conversion: процент и raw counts одного MTD ответа.
-    Возвращает полный снимок для построителя отчёта.
+    Возвращает типизированный снимок вместе с проблемами конфигурации.
     """
-    apps = get_adapty_apps()
+    portfolio = load_daily_portfolio()
     base_url = get_adapty_base_url()
     path = get_adapty_analytics_path()
     conversion_path = get_adapty_conversion_path()
@@ -592,7 +617,11 @@ def fetch_all_metrics(
     date_target = datetime(target_date.year, target_date.month, target_date.day)
     date_prev = datetime(prev_date.year, prev_date.month, prev_date.day)
 
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = [
+        validate_app_metrics(_missing_app_row(slot, portfolio.issues))
+        for slot in portfolio.slots
+        if slot.api_key is None
+    ]
 
     def job(
         app_index: int, app_key: str, app_name: str, is_visible: bool
@@ -611,35 +640,42 @@ def fetch_all_metrics(
             report_date=date_target,
         )
 
-    with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:
-        futures = {
-            executor.submit(job, i, app.api_key, app.name, app.is_visible): i
-            for i, app in enumerate(apps)
-        }
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                logger.exception("Failed to fetch app metrics: %s", e)
-                idx = futures[future]
-                results.append(
-                    {
-                        "index": idx,
-                        "name": apps[idx].name,
-                        "mrr_total": None,
-                        "mrr_delta_24h": None,
-                        "installs_total": None,
-                        "installs_delta_24h": None,
-                        "revenue_total": None,
-                        "revenue_per_day": None,
-                        "arr_total": None,
-                        "arr_delta_24h": None,
-                        "conv_rate": None,
-                        "conv_from": None,
-                        "conv_to": None,
-                        "is_visible": apps[idx].is_visible,
-                    }
-                )
+    fetchable_slots = [slot for slot in portfolio.slots if slot.api_key is not None]
+    if fetchable_slots:
+        with ThreadPoolExecutor(max_workers=min(len(fetchable_slots), 6)) as executor:
+            futures = {
+                executor.submit(
+                    job,
+                    slot.index,
+                    slot.api_key,
+                    slot.name,
+                    True,
+                ): slot
+                for slot in fetchable_slots
+            }
+            for future in as_completed(futures):
+                slot = futures[future]
+                try:
+                    row = future.result()
+                except Exception as error:
+                    logger.exception("Failed to fetch app metrics: %s", error)
+                    fetch_issue = IntegrityIssue(
+                        code="fetch.failed",
+                        message=f"{slot.name}: metric collection failed",
+                        app_name=slot.name,
+                    )
+                    row = _missing_app_row(slot, (fetch_issue,))
+                results.append(validate_app_metrics(row))
 
     results.sort(key=lambda r: r["index"])
-    return results
+    return DailyMetricsSnapshot(
+        rows=tuple(results),
+        portfolio_issues=portfolio.issues,
+    )
+
+
+def fetch_all_metrics(
+    report_date: Union[date, datetime, None] = None,
+) -> list[dict[str, Any]]:
+    """Compatibility wrapper for callers that still consume a row list."""
+    return list(fetch_daily_snapshot(report_date).rows)

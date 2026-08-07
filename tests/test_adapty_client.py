@@ -2,9 +2,16 @@
 
 from datetime import date, datetime
 import math
-from types import SimpleNamespace
 import unittest
 from unittest.mock import call, patch
+
+from daily_metric_integrity import REPORT_VALUE_FIELDS
+from daily_report_contract import (
+    CANONICAL_APP_NAMES,
+    DailyAppSlot,
+    DailyPortfolio,
+    IntegrityIssue,
+)
 
 
 MRR_RESPONSE = {
@@ -349,7 +356,7 @@ class TestRequestReliability(unittest.TestCase):
         self.assertEqual(started_at, 10.5)
 
 
-class TestFetchAllMetrics(unittest.TestCase):
+class TestFetchDailySnapshot(unittest.TestCase):
     @patch("adapty_client._fetch_app_snapshot")
     @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
     @patch(
@@ -360,10 +367,128 @@ class TestFetchAllMetrics(unittest.TestCase):
         "adapty_client.get_adapty_base_url",
         return_value="https://api-admin.adapty.io",
     )
-    @patch("adapty_client.get_adapty_apps")
-    def test_preserves_app_order_and_returns_complete_missing_row_on_failure(
+    @patch("adapty_client.load_daily_portfolio")
+    def test_preserves_canonical_order_and_quarantines_failed_fetch(
         self,
-        mock_get_apps,
+        mock_load_portfolio,
+        _mock_base_url,
+        _mock_analytics_path,
+        _mock_conversion_path,
+        _mock_timezone,
+        mock_snapshot,
+    ):
+        from adapty_client import fetch_daily_snapshot
+
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=tuple(
+                DailyAppSlot(index=i, name=name, api_key=f"key-{i + 1}")
+                for i, name in enumerate(CANONICAL_APP_NAMES)
+            ),
+            issues=(),
+        )
+
+        def snapshot_result(**kwargs):
+            if kwargs["app_index"] == 1:
+                raise RuntimeError("sanitized failure")
+            return {
+                "index": kwargs["app_index"],
+                "name": kwargs["app_name"],
+                "mrr_total": 100.0,
+                "mrr_delta_24h": 1.0,
+                "arr_total": 1200.0,
+                "arr_delta_24h": 12.0,
+                "revenue_total": 50.0,
+                "revenue_per_day": 5.0,
+                "installs_total": 100,
+                "installs_delta_24h": 10,
+                "conv_rate": 10.0,
+                "conv_from": 100,
+                "conv_to": 10,
+                "is_visible": kwargs["is_visible"],
+            }
+
+        mock_snapshot.side_effect = snapshot_result
+
+        snapshot = fetch_daily_snapshot(report_date=date(2026, 8, 6))
+        rows = snapshot.rows
+
+        self.assertEqual([row["name"] for row in rows], list(CANONICAL_APP_NAMES))
+        self.assertEqual(snapshot.portfolio_issues, ())
+        failed = rows[1]
+        self.assertTrue(all(failed[field] is None for field in REPORT_VALUE_FIELDS))
+        self.assertIn("fetch.failed", {issue.code for issue in failed["issues"]})
+
+    @patch("adapty_client._fetch_app_snapshot")
+    @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
+    @patch("adapty_client.get_adapty_conversion_path", return_value="conversion/")
+    @patch("adapty_client.get_adapty_analytics_path", return_value="analytics/")
+    @patch("adapty_client.get_adapty_base_url", return_value="https://api-admin.adapty.io")
+    @patch("adapty_client.load_daily_portfolio")
+    def test_missing_key_returns_complete_na_row_without_submitting_it(
+        self,
+        mock_load_portfolio,
+        _mock_base_url,
+        _mock_analytics_path,
+        _mock_conversion_path,
+        _mock_timezone,
+        mock_snapshot,
+    ):
+        from adapty_client import fetch_daily_snapshot
+
+        missing = IntegrityIssue(
+            code="config.missing_key",
+            message="APP3 key missing",
+            app_name=CANONICAL_APP_NAMES[2],
+        )
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=(
+                DailyAppSlot(0, CANONICAL_APP_NAMES[0], "key-1"),
+                DailyAppSlot(1, CANONICAL_APP_NAMES[1], "key-2"),
+                DailyAppSlot(2, CANONICAL_APP_NAMES[2], None),
+            ),
+            issues=(missing,),
+        )
+        mock_snapshot.side_effect = lambda **kwargs: {
+            "index": kwargs["app_index"],
+            "name": kwargs["app_name"],
+            "mrr_total": 100.0,
+            "mrr_delta_24h": 1.0,
+            "arr_total": 1200.0,
+            "arr_delta_24h": 12.0,
+            "revenue_total": 50.0,
+            "revenue_per_day": 5.0,
+            "installs_total": 100,
+            "installs_delta_24h": 10,
+            "conv_rate": 10.0,
+            "conv_from": 100,
+            "conv_to": 10,
+            "is_visible": True,
+        }
+
+        snapshot = fetch_daily_snapshot(date(2026, 8, 6))
+
+        self.assertEqual(snapshot.rows[2]["name"], CANONICAL_APP_NAMES[2])
+        self.assertTrue(
+            all(snapshot.rows[2][field] is None for field in REPORT_VALUE_FIELDS)
+        )
+        self.assertIn(
+            "config.missing_key",
+            {issue.code for issue in snapshot.rows[2]["issues"]},
+        )
+        submitted_names = {
+            call.kwargs["app_name"] for call in mock_snapshot.call_args_list
+        }
+        self.assertNotIn(CANONICAL_APP_NAMES[2], submitted_names)
+
+    @patch("adapty_client._fetch_app_snapshot")
+    @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
+    @patch("adapty_client.get_adapty_conversion_path", return_value="conversion/")
+    @patch("adapty_client.get_adapty_analytics_path", return_value="analytics/")
+    @patch("adapty_client.get_adapty_base_url", return_value="https://api-admin.adapty.io")
+    @patch("adapty_client.load_daily_portfolio")
+    def test_compatibility_wrapper_returns_snapshot_rows(
+        self,
+        mock_load_portfolio,
         _mock_base_url,
         _mock_analytics_path,
         _mock_conversion_path,
@@ -372,34 +497,18 @@ class TestFetchAllMetrics(unittest.TestCase):
     ):
         from adapty_client import fetch_all_metrics
 
-        mock_get_apps.return_value = [
-            SimpleNamespace(api_key="key-1", name="First", is_visible=True),
-            SimpleNamespace(api_key="key-2", name="Second", is_visible=True),
-            SimpleNamespace(api_key="key-3", name="Third", is_visible=True),
-        ]
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=tuple(
+                DailyAppSlot(index=i, name=name, api_key=None)
+                for i, name in enumerate(CANONICAL_APP_NAMES)
+            ),
+            issues=(),
+        )
 
-        def snapshot_result(**kwargs):
-            if kwargs["app_index"] == 1:
-                raise RuntimeError("sanitized failure")
-            return {
-                "index": kwargs["app_index"],
-                "name": kwargs["app_name"],
-                "is_visible": kwargs["is_visible"],
-            }
+        rows = fetch_all_metrics(date(2026, 8, 6))
 
-        mock_snapshot.side_effect = snapshot_result
-
-        rows = fetch_all_metrics(report_date=date(2026, 8, 6))
-
-        self.assertEqual([row["name"] for row in rows], ["First", "Second", "Third"])
-        failed = rows[1]
-        self.assertIsNone(failed["mrr_total"])
-        self.assertIsNone(failed["arr_total"])
-        self.assertIsNone(failed["revenue_total"])
-        self.assertIsNone(failed["installs_total"])
-        self.assertIsNone(failed["conv_rate"])
-        self.assertIsNone(failed["conv_from"])
-        self.assertIsNone(failed["conv_to"])
+        self.assertEqual(tuple(row["name"] for row in rows), CANONICAL_APP_NAMES)
+        mock_snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

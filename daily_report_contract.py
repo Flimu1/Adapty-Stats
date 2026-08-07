@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import os
 import re
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 
 CANONICAL_APP_NAMES = (
@@ -33,6 +33,12 @@ class DailyAppSlot:
 class DailyPortfolio:
     slots: tuple[DailyAppSlot, ...]
     issues: tuple[IntegrityIssue, ...]
+
+
+@dataclass(frozen=True)
+class DailyMetricsSnapshot:
+    rows: tuple[dict[str, Any], ...]
+    portfolio_issues: tuple[IntegrityIssue, ...]
 
 
 def load_daily_portfolio(
