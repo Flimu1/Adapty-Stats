@@ -1,4 +1,9 @@
 import unittest
+import hashlib
+
+
+def _fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class TestDailyPortfolioContract(unittest.TestCase):
@@ -19,10 +24,13 @@ class TestDailyPortfolioContract(unittest.TestCase):
 
         env = {
             "ADAPTY_API_KEY_APP1": "secret-one",
+            "ADAPTY_API_KEY_APP1_SHA256": _fingerprint("secret-one"),
             "ADAPTY_APP_NAME_1": CANONICAL_APP_NAMES[0],
             "ADAPTY_API_KEY_APP2": "secret-two",
+            "ADAPTY_API_KEY_APP2_SHA256": _fingerprint("secret-two"),
             "ADAPTY_APP_NAME_2": CANONICAL_APP_NAMES[1],
             "ADAPTY_API_KEY_APP3": "secret-three",
+            "ADAPTY_API_KEY_APP3_SHA256": _fingerprint("secret-three"),
             "ADAPTY_APP_NAME_3": CANONICAL_APP_NAMES[2],
         }
 
@@ -55,6 +63,10 @@ class TestDailyPortfolioContract(unittest.TestCase):
                 f"ADAPTY_APP_NAME_{i}": name
                 for i, name in enumerate(CANONICAL_APP_NAMES, start=1)
             },
+            **{
+                f"ADAPTY_API_KEY_APP{i}_SHA256": _fingerprint(f"key-{i}")
+                for i in range(1, 4)
+            },
             "ADAPTY_APP_NAME_4": "TeaNote",
             "ADAPTY_APP_VISIBLE_3": "false",
         }
@@ -66,6 +78,39 @@ class TestDailyPortfolioContract(unittest.TestCase):
         self.assertEqual(
             {issue.code for issue in portfolio.issues},
             {"config.extra_slot", "config.visibility_override"},
+        )
+
+    def test_wrong_key_fingerprint_blocks_fetch_without_exposing_hash_or_key(self):
+        from daily_report_contract import CANONICAL_APP_NAMES, load_daily_portfolio
+
+        env = {
+            "ADAPTY_API_KEY_APP1": "wrong-secret",
+            "ADAPTY_API_KEY_APP1_SHA256": _fingerprint("expected-secret"),
+            "ADAPTY_APP_NAME_1": CANONICAL_APP_NAMES[0],
+        }
+
+        portfolio = load_daily_portfolio(env)
+
+        self.assertIsNone(portfolio.slots[0].api_key)
+        self.assertIn(
+            "config.key_fingerprint_mismatch",
+            {issue.code for issue in portfolio.issues},
+        )
+        self.assertNotIn("wrong-secret", repr(portfolio))
+        self.assertNotIn(env["ADAPTY_API_KEY_APP1_SHA256"], repr(portfolio))
+
+    def test_missing_key_fingerprint_blocks_otherwise_valid_slot(self):
+        from daily_report_contract import CANONICAL_APP_NAMES, load_daily_portfolio
+
+        portfolio = load_daily_portfolio({
+            "ADAPTY_API_KEY_APP1": "secret-one",
+            "ADAPTY_APP_NAME_1": CANONICAL_APP_NAMES[0],
+        })
+
+        self.assertIsNone(portfolio.slots[0].api_key)
+        self.assertIn(
+            "config.missing_key_fingerprint",
+            {issue.code for issue in portfolio.issues},
         )
 
 

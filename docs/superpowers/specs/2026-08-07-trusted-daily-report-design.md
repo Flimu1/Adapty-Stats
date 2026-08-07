@@ -60,7 +60,8 @@ the A/B and Apple Ads reports.
 
 For the daily report:
 
-- slots 1–3 must have exact names and non-empty Secret API keys;
+- slots 1–3 must have exact names, non-empty Secret API keys, and matching
+  per-slot SHA-256 fingerprints stored separately in configuration;
 - all three slots are visible;
 - `ADAPTY_APP_VISIBLE_*` does not control daily report scope;
 - APP4 and later slots are ignored and reported as stale configuration;
@@ -71,6 +72,11 @@ For the daily report:
 
 Secret key values are excluded from dataclass representations, logs, errors,
 tests, report text, and audit records.
+
+The fingerprint is an identity guard, not a credential: the loader computes
+SHA-256 locally and uses constant-time comparison. A missing or mismatched
+fingerprint blocks that slot before any Adapty request. Neither the key nor its
+fingerprint is included in messages, representations, or audit output.
 
 ## Metric Provenance
 
@@ -236,7 +242,8 @@ The complete existing suite must remain green.
 
 Before enabling the strict portfolio contract in production:
 
-1. securely replace APP3 with Otty's Secret API key and exact name;
+1. securely replace APP3 with Otty's Secret API key, matching SHA-256
+   fingerprint, and exact name;
 2. remove Calorie Tracker, TeaNote, APP4, and visibility overrides;
 3. run a no-send preview for 6 August and the current closed day;
 4. compare the three applications and totals with Adapty using the same

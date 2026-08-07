@@ -128,9 +128,9 @@ python main.py --send-ab-report
 2. В настройках сервиса задайте **переменные окружения** (Variables) — те же, что в `.env`:
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
-   - `ADAPTY_API_KEY_APP1`, `ADAPTY_APP_NAME_1`
-   - `ADAPTY_API_KEY_APP2`, `ADAPTY_APP_NAME_2`
-   - `ADAPTY_API_KEY_APP3`, `ADAPTY_APP_NAME_3`
+   - `ADAPTY_API_KEY_APP1`, `ADAPTY_API_KEY_APP1_SHA256`, `ADAPTY_APP_NAME_1`
+   - `ADAPTY_API_KEY_APP2`, `ADAPTY_API_KEY_APP2_SHA256`, `ADAPTY_APP_NAME_2`
+   - `ADAPTY_API_KEY_APP3`, `ADAPTY_API_KEY_APP3_SHA256`, `ADAPTY_APP_NAME_3`
    - При необходимости: `REPORT_TIME`, `ADAPTY_API_BASE_URL`, `ADAPTY_ANALYTICS_PATH`
    - Для Apple Ads-only отчёта при его использовании: `ADAPTY_DASHBOARD_TOKEN`,
      `ADAPTY_DASHBOARD_COMPANY_ID`, `ADAPTY_DASHBOARD_APP_ID`
@@ -153,8 +153,10 @@ Production использует неизменяемый контракт из �
 - `APP3` — `Otty: Couples&Relationships`.
 
 `APP4+` и `ADAPTY_APP_VISIBLE_N` не участвуют в расчётах и отмечаются как
-ошибка конфигурации. Неверное точное имя или отсутствующий Secret API key
-блокирует запрос этого слота и превращает его метрики в `N/A`. Поэтому каждый
+ошибка конфигурации. Неверное точное имя, отсутствующий Secret API key или
+несовпадение его SHA-256 fingerprint блокирует запрос этого слота и превращает
+его метрики в `N/A`. Fingerprint привязывает валидный ключ к правильному слоту,
+но ни ключ, ни fingerprint не выводятся в отчёт или audit log. Поэтому каждый
 доллар в `Total` всегда воспроизводится из трёх строк над ним.
 
 ## Определения метрик и сверка с Adapty

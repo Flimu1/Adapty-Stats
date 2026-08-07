@@ -1,6 +1,8 @@
 """Strict, secret-safe configuration contract for the main daily report."""
 
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import os
 import re
 from typing import Any, Mapping, Optional
@@ -51,6 +53,9 @@ def load_daily_portfolio(
 
     for index, expected_name in enumerate(CANONICAL_APP_NAMES, start=1):
         key = source.get(f"ADAPTY_API_KEY_APP{index}", "").strip()
+        expected_fingerprint = source.get(
+            f"ADAPTY_API_KEY_APP{index}_SHA256", ""
+        ).strip().lower()
         actual_name = source.get(f"ADAPTY_APP_NAME_{index}", "").strip()
         fetchable_key: Optional[str] = key or None
 
@@ -70,6 +75,22 @@ def load_daily_portfolio(
                 message=f"APP{index}: Secret API key is missing",
                 app_name=expected_name,
             ))
+        elif actual_name == expected_name:
+            actual_fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            if not expected_fingerprint:
+                fetchable_key = None
+                issues.append(IntegrityIssue(
+                    code="config.missing_key_fingerprint",
+                    message=f"APP{index}: Secret API key fingerprint is missing",
+                    app_name=expected_name,
+                ))
+            elif not hmac.compare_digest(actual_fingerprint, expected_fingerprint):
+                fetchable_key = None
+                issues.append(IntegrityIssue(
+                    code="config.key_fingerprint_mismatch",
+                    message=f"APP{index}: Secret API key does not match its canonical slot",
+                    app_name=expected_name,
+                ))
 
         slots.append(DailyAppSlot(
             index=index - 1,
