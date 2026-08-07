@@ -140,6 +140,27 @@ def _mock_fetch_with_zero_values(*_args, **_kwargs):
     return rows
 
 
+def _mock_fetch_august_6_after_backfill(*_args, **_kwargs):
+    return [
+        {
+            "index": 0,
+            "name": "Unfollowers: Follow & Unfollow",
+            "mrr_total": 1272.866100428855,
+            "mrr_delta_24h": -104.63,
+            "arr_total": 15274.393205146269,
+            "arr_delta_24h": -1255.53,
+            "revenue_total": 262.9883818251301,
+            "revenue_per_day": 11.90,
+            "installs_total": 1793,
+            "installs_delta_24h": 321,
+            "conv_rate": 0.8365867261572784,
+            "conv_from": 1793,
+            "conv_to": 15,
+            "is_visible": True,
+        }
+    ]
+
+
 class TestReportBuilder(unittest.TestCase):
     @patch("report_builder.fetch_all_metrics", side_effect=_mock_fetch_all_metrics)
     def test_report_contains_total_section(self, _mock_fetch):
@@ -299,6 +320,33 @@ class TestReportBuilder(unittest.TestCase):
         self.assertIn("Revenue day", anomaly_text)
         self.assertIn("Conversion", anomaly_text)
         self.assertIn("Conversion paid", anomaly_text)
+
+    @patch(
+        "report_builder.fetch_all_metrics",
+        side_effect=_mock_fetch_with_multiple_missing_fields,
+    )
+    def test_report_renders_application_and_missing_metric_details(self, _mock_fetch):
+        from report_builder import build_report
+
+        result = build_report(report_date=date(2026, 8, 6))
+
+        self.assertIn("• App One: отсутствуют поля", result.text)
+        self.assertIn("Revenue day", result.text)
+        self.assertIn("Conversion paid", result.text)
+
+    @patch(
+        "report_builder.fetch_all_metrics",
+        side_effect=_mock_fetch_august_6_after_backfill,
+    )
+    def test_august_6_snapshot_accepts_late_install_backfill(self, _mock_fetch):
+        from report_builder import build_report_text
+
+        text = build_report_text(report_date=date(2026, 8, 6))
+
+        self.assertIn("Installs (месяц): 1,793 (+321)", text)
+        self.assertIn("Conv. Install→Paid (месяц): 0.84%", text)
+        self.assertIn("Total Downloads (за сутки): (+321)", text)
+        self.assertNotIn("1,784", text)
 
 
 if __name__ == "__main__":

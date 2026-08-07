@@ -179,6 +179,13 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
     ]
     if anomalies:
         lines.append("⚠️ <b>Обнаружены аномалии в данных, проверьте источники</b>")
+        for anomaly in anomalies[:5]:
+            detail = _escape_html(anomaly)
+            if len(detail) > 300:
+                detail = f"{detail[:297]}..."
+            lines.append(f"• {detail}")
+        if len(anomalies) > 5:
+            lines.append(f"• Ещё аномалий: {len(anomalies) - 5}")
         lines.append("")
     total_mrr = _sum_complete(rows, "mrr_total")
     total_mrr_delta = _sum_complete(rows, "mrr_delta_24h")

@@ -4,6 +4,8 @@
 API: POST /api/v1/client-api/metrics/analytics/ (api-admin.adapty.io)
 """
 import logging
+import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -31,6 +33,7 @@ class ChartMetric:
 
     value: float
     daily_values: tuple[float, ...]
+    daily_dates: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,35 @@ def _metric_key(chart_id: str) -> str:
     raise ValueError(f"Unsupported Adapty chart: {chart_id}")
 
 
+def _parse_finite_number(value: Any) -> Optional[float]:
+    """Accept real finite numbers but reject booleans and numeric garbage."""
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _parse_count(value: Any) -> Optional[int]:
+    """Parse a non-negative mathematical integer without truncation."""
+    number = _parse_finite_number(value)
+    if number is None or number < 0 or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _parse_point_date(value: Any) -> Optional[str]:
+    """Normalize Adapty date or timestamp labels to an ISO calendar date."""
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 def _parse_chart_metric(
     payload: dict[str, Any], chart_id: str
 ) -> Optional[ChartMetric]:
@@ -61,12 +93,21 @@ def _parse_chart_metric(
     metric = data.get(_metric_key(chart_id))
     if not isinstance(metric, dict):
         return None
-    try:
-        value = float(metric["value"])
-    except (KeyError, TypeError, ValueError):
+    if "value" not in metric:
         return None
+    if chart_id == "installs":
+        count_value = _parse_count(metric["value"])
+        if count_value is None:
+            return None
+        value = float(count_value)
+    else:
+        parsed_value = _parse_finite_number(metric["value"])
+        if parsed_value is None:
+            return None
+        value = parsed_value
 
     daily_values: list[float] = []
+    daily_dates: list[str] = []
     series = metric.get("data")
     if isinstance(series, list) and series:
         first_series = series[0]
@@ -76,24 +117,40 @@ def _parse_chart_metric(
         if not isinstance(values, list):
             return None
         for point in values:
-            try:
-                daily_values.append(float(point["y"]))
-            except (KeyError, TypeError, ValueError):
+            if not isinstance(point, dict):
                 return None
-    return ChartMetric(value=value, daily_values=tuple(daily_values))
+            point_date = _parse_point_date(point.get("x"))
+            if point_date is None:
+                return None
+            if chart_id == "installs":
+                point_count = _parse_count(point.get("y"))
+                if point_count is None:
+                    return None
+                point_value = float(point_count)
+            else:
+                parsed_point = _parse_finite_number(point.get("y"))
+                if parsed_point is None:
+                    return None
+                point_value = parsed_point
+            daily_dates.append(point_date)
+            daily_values.append(point_value)
+    return ChartMetric(
+        value=value,
+        daily_values=tuple(daily_values),
+        daily_dates=tuple(daily_dates),
+    )
 
 
 def _parse_conversion_metric(payload: dict[str, Any]) -> Optional[ConversionMetric]:
     """Parse Adapty's percentage and the raw counts used to calculate it."""
     if payload.get("metric_name") != "install_paid":
         return None
-    try:
-        value = float(payload["value"])
-        value_from = int(payload["value_from"])
-        value_to = int(payload["value_to"])
-    except (KeyError, TypeError, ValueError):
+    value = _parse_finite_number(payload.get("value"))
+    value_from = _parse_count(payload.get("value_from"))
+    value_to = _parse_count(payload.get("value_to"))
+    if value is None or value_from is None or value_to is None:
         return None
-    if value_from < 0 or value_to < 0 or value_to > value_from:
+    if not 0 <= value <= 100 or value_to > value_from:
         return None
     return ConversionMetric(value=value, value_from=value_from, value_to=value_to)
 
@@ -101,15 +158,16 @@ def _parse_conversion_metric(payload: dict[str, Any]) -> Optional[ConversionMetr
 def _get_session() -> requests.Session:
     """
     Возвращает requests.Session с настроенным HTTPAdapter и retry-логикой.
-    Автоматически повторяет запросы при ошибках 500, 502, 503, 504 и проблемах с сетью.
+    Повторяет rate-limit/server ошибки и учитывает Retry-After.
     """
     session = requests.Session()
 
     retry_strategy = Retry(
         total=3,
         backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504],
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+        respect_retry_after_header=True,
     )
 
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -127,6 +185,8 @@ def _fetch_chart(
     chart_id: str,
     date_from: datetime,
     date_to: datetime,
+    *,
+    session: Optional[requests.Session] = None,
 ) -> Optional[ChartMetric]:
     """
     Один запрос к Adapty за одну метрику.
@@ -150,8 +210,8 @@ def _fetch_chart(
         "format": "json",
     }
     try:
-        session = _get_session()
-        resp = session.post(url, json=body, headers=headers, timeout=30)
+        request_session = session or _get_session()
+        resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
             "Adapty API response: status=%s chart_id=%s body=%s",
             resp.status_code,
@@ -185,6 +245,8 @@ def _fetch_conversion(
     timezone: str,
     date_from: datetime,
     date_to: datetime,
+    *,
+    session: Optional[requests.Session] = None,
 ) -> Optional[ConversionMetric]:
     """
     Запрашивает когортную конверсию Install → Paid через Adapty Conversion API.
@@ -207,8 +269,8 @@ def _fetch_conversion(
         "format": "json",
     }
     try:
-        session = _get_session()
-        resp = session.post(url, json=body, headers=headers, timeout=30)
+        request_session = session or _get_session()
+        resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
             "Adapty Conversion API response: status=%s body=%s",
             resp.status_code,
@@ -355,16 +417,46 @@ def _debug_adapty_response() -> None:
         print()
 
 
-def _last_value(metric: Optional[ChartMetric]) -> Optional[float]:
-    """Return the final daily point, preserving a numeric zero."""
-    if metric is None or not metric.daily_values:
+def _pace_request(previous_started_at: Optional[float]) -> float:
+    """Keep sequential request starts at or below Adapty's two-per-second limit."""
+    started_at = time.monotonic()
+    if previous_started_at is not None:
+        wait_seconds = 0.5 - (started_at - previous_started_at)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            started_at = time.monotonic()
+    return started_at
+
+
+def _last_value(
+    metric: Optional[ChartMetric], expected_date: datetime
+) -> Optional[float]:
+    """Return the final daily point only when it belongs to the report date."""
+    expected = expected_date.strftime("%Y-%m-%d")
+    if (
+        metric is None
+        or not metric.daily_values
+        or not metric.daily_dates
+        or metric.daily_dates[-1] != expected
+    ):
         return None
     return metric.daily_values[-1]
 
 
-def _last_delta(metric: Optional[ChartMetric]) -> Optional[float]:
-    """Return the difference between the final two daily points."""
-    if metric is None or len(metric.daily_values) < 2:
+def _last_delta(
+    metric: Optional[ChartMetric], previous_date: datetime, report_date: datetime
+) -> Optional[float]:
+    """Return a delta only for the two exact requested calendar dates."""
+    expected_dates = (
+        previous_date.strftime("%Y-%m-%d"),
+        report_date.strftime("%Y-%m-%d"),
+    )
+    if (
+        metric is None
+        or len(metric.daily_values) < 2
+        or len(metric.daily_dates) < 2
+        or metric.daily_dates[-2:] != expected_dates
+    ):
         return None
     return metric.daily_values[-1] - metric.daily_values[-2]
 
@@ -384,6 +476,8 @@ def _fetch_app_snapshot(
     report_date: datetime,
 ) -> dict[str, Any]:
     """Collect one internally consistent five-response application snapshot."""
+    session = _get_session()
+    request_started_at = _pace_request(None)
     mrr = _fetch_chart(
         app_key,
         base_url,
@@ -392,7 +486,9 @@ def _fetch_app_snapshot(
         "mrr",
         previous_date,
         report_date,
+        session=session,
     )
+    request_started_at = _pace_request(request_started_at)
     arr = _fetch_chart(
         app_key,
         base_url,
@@ -401,7 +497,9 @@ def _fetch_app_snapshot(
         "arr",
         previous_date,
         report_date,
+        session=session,
     )
+    request_started_at = _pace_request(request_started_at)
     revenue = _fetch_chart(
         app_key,
         base_url,
@@ -410,7 +508,9 @@ def _fetch_app_snapshot(
         "revenue",
         month_start,
         report_date,
+        session=session,
     )
+    request_started_at = _pace_request(request_started_at)
     installs = _fetch_chart(
         app_key,
         base_url,
@@ -419,7 +519,9 @@ def _fetch_app_snapshot(
         "installs",
         month_start,
         report_date,
+        session=session,
     )
+    _pace_request(request_started_at)
     conversion = _fetch_conversion(
         app_key,
         base_url,
@@ -427,23 +529,24 @@ def _fetch_app_snapshot(
         timezone,
         month_start,
         report_date,
+        session=session,
     )
 
     installs_total = int(installs.value) if installs is not None else None
-    installs_today = _last_value(installs)
+    installs_today = _last_value(installs, report_date)
     return {
         "index": app_index,
         "name": app_name,
-        "mrr_total": _last_value(mrr),
-        "mrr_delta_24h": _last_delta(mrr),
+        "mrr_total": _last_value(mrr, report_date),
+        "mrr_delta_24h": _last_delta(mrr, previous_date, report_date),
         "installs_total": installs_total,
         "installs_delta_24h": (
             int(installs_today) if installs_today is not None else None
         ),
         "revenue_total": revenue.value if revenue is not None else None,
-        "revenue_per_day": _last_value(revenue),
-        "arr_total": _last_value(arr),
-        "arr_delta_24h": _last_delta(arr),
+        "revenue_per_day": _last_value(revenue, report_date),
+        "arr_total": _last_value(arr, report_date),
+        "arr_delta_24h": _last_delta(arr, previous_date, report_date),
         "conv_rate": conversion.value if conversion is not None else None,
         "conv_from": conversion.value_from if conversion is not None else None,
         "conv_to": conversion.value_to if conversion is not None else None,
