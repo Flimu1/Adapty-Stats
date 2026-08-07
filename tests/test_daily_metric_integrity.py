@@ -1,0 +1,170 @@
+from datetime import date
+import math
+import unittest
+
+from daily_report_contract import IntegrityIssue
+
+
+def valid_row() -> dict:
+    return {
+        "index": 0,
+        "name": "Unfollowers: Follow & Unfollow",
+        "mrr_total": 100.0,
+        "mrr_delta_24h": 5.0,
+        "arr_total": 1200.0,
+        "arr_delta_24h": 60.0,
+        "revenue_total": 50.0,
+        "revenue_per_day": 5.0,
+        "installs_total": 100,
+        "installs_delta_24h": 10,
+        "conv_rate": 10.0,
+        "conv_from": 100,
+        "conv_to": 10,
+        "issues": (),
+        "is_visible": True,
+    }
+
+
+class TestDailyMetricValidation(unittest.TestCase):
+    def test_revenue_inconsistency_quarantines_only_revenue_family(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row["revenue_total"] = 10.0
+        row["revenue_per_day"] = 11.0
+        result = validate_app_metrics(row)
+
+        self.assertIsNone(result["revenue_total"])
+        self.assertIsNone(result["revenue_per_day"])
+        self.assertEqual(result["mrr_total"], row["mrr_total"])
+        self.assertIn("revenue.day_exceeds_mtd", {i.code for i in result["issues"]})
+
+    def test_installs_inconsistency_quarantines_only_installs_family(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row["installs_total"] = 10
+        row["installs_delta_24h"] = 11
+        result = validate_app_metrics(row)
+
+        self.assertIsNone(result["installs_total"])
+        self.assertIsNone(result["installs_delta_24h"])
+        self.assertEqual(result["revenue_total"], row["revenue_total"])
+
+    def test_conversion_rate_must_reconcile_with_raw_counts(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row.update(conv_rate=9.0, conv_from=100, conv_to=10)
+        result = validate_app_metrics(row)
+
+        self.assertIsNone(result["conv_rate"])
+        self.assertIsNone(result["conv_from"])
+        self.assertIsNone(result["conv_to"])
+        self.assertIn("conversion.ratio_mismatch", {i.code for i in result["issues"]})
+
+    def test_invalid_numeric_types_are_quarantined(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        for field, value in (
+            ("mrr_total", True),
+            ("arr_total", math.nan),
+            ("revenue_total", math.inf),
+            ("installs_total", 3.5),
+        ):
+            with self.subTest(field=field):
+                row = valid_row()
+                row[field] = value
+                self.assertIsNone(validate_app_metrics(row)[field])
+
+    def test_zero_conversion_is_valid_only_with_zero_paid_and_rate(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row.update(conv_rate=0.0, conv_from=0, conv_to=0)
+        self.assertEqual(validate_app_metrics(row)["conv_rate"], 0.0)
+
+        row.update(conv_rate=1.0, conv_from=0, conv_to=0)
+        self.assertIsNone(validate_app_metrics(row)["conv_rate"])
+
+    def test_paid_count_cannot_exceed_eligible_count(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row.update(conv_rate=100.0, conv_from=5, conv_to=6)
+        result = validate_app_metrics(row)
+        self.assertIsNone(result["conv_from"])
+        self.assertIn("conversion.invalid_counts", {i.code for i in result["issues"]})
+
+    def test_arr_value_mismatch_quarantines_arr_but_preserves_mrr(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row["arr_total"] = 1199.90
+        result = validate_app_metrics(row)
+
+        self.assertEqual(result["mrr_total"], 100.0)
+        self.assertIsNone(result["arr_total"])
+        self.assertIn("arr.mrr_multiple_mismatch", {i.code for i in result["issues"]})
+
+    def test_arr_tolerance_accepts_rounding_noise(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row["arr_total"] = 1200.04
+        self.assertEqual(validate_app_metrics(row)["arr_total"], 1200.04)
+
+    def test_input_row_is_not_mutated(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        row = valid_row()
+        row["revenue_per_day"] = 100.0
+        validate_app_metrics(row)
+        self.assertEqual(row["revenue_total"], 50.0)
+        self.assertEqual(row["revenue_per_day"], 100.0)
+        self.assertEqual(row["issues"], ())
+
+
+class TestDailyMetricAudit(unittest.TestCase):
+    def test_problem_count_deduplicates_issue_identity(self):
+        from daily_metric_integrity import count_integrity_problems
+
+        issue = IntegrityIssue(
+            code="revenue.invalid",
+            message="invalid",
+            app_name="Granny Photos",
+            metric="revenue_total",
+        )
+        rows = ({"issues": (issue, issue)},)
+        portfolio_issue = IntegrityIssue(code="config.extra_slot", message="ignored")
+
+        self.assertEqual(count_integrity_problems(rows, (portfolio_issue,)), 2)
+
+    def test_audit_logs_status_without_values_or_secrets(self):
+        from daily_metric_integrity import emit_integrity_audit, validate_app_metrics
+
+        row = valid_row()
+        row["api_key"] = "sanitized-secret-key"
+        validated = validate_app_metrics(row)
+
+        with self.assertLogs("daily_metric_integrity", level="INFO") as captured:
+            emit_integrity_audit(
+                report_date=date(2026, 8, 6),
+                timezone="Europe/Minsk",
+                rows=(validated,),
+                total_status={"mrr_total": True, "revenue_total": False},
+                portfolio_issues=(),
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn("report_date=2026-08-06", output)
+        self.assertIn("slot=1", output)
+        self.assertIn("app=Unfollowers: Follow & Unfollow", output)
+        self.assertIn("metric=mrr_total status=valid", output)
+        self.assertIn("total_metric=revenue_total status=invalid", output)
+        self.assertNotIn("sanitized-secret-key", output)
+        self.assertNotIn("api_key", output)
+
+
+if __name__ == "__main__":
+    unittest.main()
