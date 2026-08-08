@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
@@ -24,22 +25,27 @@ class ReportBuildResult:
     integrity_problem_count: int = 0
 
 
-def _fmt_num(n: Union[float, int, None]) -> str:
+_CENT = Decimal("0.01")
+
+
+def _round_money(value: Union[float, int, Decimal]) -> Decimal:
+    return Decimal(str(value)).quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def _fmt_num(n: Union[float, int, Decimal, None]) -> str:
     if n is None:
         return "N/A"
-    if isinstance(n, float):
-        if n == int(n):
-            n = int(n)
-        else:
-            return f"{n:,.2f}"
-    return f"{int(n):,}"
+    value = _round_money(n)
+    if value == value.to_integral_value():
+        return f"{int(value):,}"
+    return f"{value:,.2f}"
 
 
 def _fmt_delta(delta: Union[float, int, None], is_mrr: bool = False) -> str:
     if delta is None:
         return "(⚠️ N/A)"
     if is_mrr:
-        rounded = round(float(delta), 2)
+        rounded = _round_money(delta)
         sign = "+" if rounded >= 0 else "-"
         return f"({sign}${_fmt_num(abs(rounded))})"
     prefix = "+" if delta >= 0 else ""
@@ -51,6 +57,13 @@ def _sum_complete(rows: Sequence[dict], key: str) -> Optional[float]:
     if not values or any(value is None for value in values):
         return None
     return sum(float(value) for value in values)
+
+
+def _sum_displayed_money(rows: Sequence[dict], key: str) -> Optional[Decimal]:
+    values = [row.get(key) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    return sum((_round_money(value) for value in values), start=Decimal("0.00"))
 
 
 def _escape_html(text: str) -> str:
@@ -93,8 +106,29 @@ def _total_conversion(rows: Sequence[dict]) -> Optional[float]:
     if total_from is None or total_to is None:
         return None
     if total_from == 0:
-        return 0.0 if total_to == 0 else None
+        return None
     return total_to / total_from * 100
+
+
+def _conversion_counts(rows: Sequence[dict]) -> Optional[tuple[int, int]]:
+    total_from = _sum_complete(rows, "conv_from")
+    total_to = _sum_complete(rows, "conv_to")
+    if total_from is None or total_to is None:
+        return None
+    return int(total_to), int(total_from)
+
+
+def _fmt_conversion(
+    rate: Optional[float],
+    converted: Optional[Union[float, int]],
+    installed: Optional[Union[float, int]],
+) -> str:
+    if converted is None or installed is None:
+        return "N/A"
+    counts = f"({int(converted):,}/{int(installed):,})"
+    if rate is None or int(installed) == 0:
+        return f"N/A {counts}"
+    return f"{float(rate):.2f}% {counts}"
 
 
 def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuildResult:
@@ -112,14 +146,15 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
     anomalies = _issue_details(rows, snapshot.portfolio_issues)
     problem_count = count_integrity_problems(rows, snapshot.portfolio_issues)
 
-    total_mrr = _sum_complete(rows, "mrr_total")
-    total_mrr_delta = _sum_complete(rows, "mrr_delta_24h")
-    total_arr = _sum_complete(rows, "arr_total")
-    total_arr_delta = _sum_complete(rows, "arr_delta_24h")
-    total_revenue = _sum_complete(rows, "revenue_total")
-    total_revenue_per_day = _sum_complete(rows, "revenue_per_day")
+    total_mrr = _sum_displayed_money(rows, "mrr_total")
+    total_mrr_delta = _sum_displayed_money(rows, "mrr_delta_24h")
+    total_arr = _sum_displayed_money(rows, "arr_total")
+    total_arr_delta = _sum_displayed_money(rows, "arr_delta_24h")
+    total_revenue = _sum_displayed_money(rows, "revenue_total")
+    total_revenue_per_day = _sum_displayed_money(rows, "revenue_per_day")
     total_inst_delta = _sum_complete(rows, "installs_delta_24h")
     total_conv = _total_conversion(rows)
+    total_conv_counts = _conversion_counts(rows)
 
     lines = [
         f"📊 Отчёт на {resolved_report_date.strftime('%d.%m.%Y')}",
@@ -141,35 +176,45 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
         lines.append(f"<b>{_escape_html(str(row.get('name', 'App')))}</b>")
         lines.append(
             f"💰 MRR (на дату): ${_fmt_num(row.get('mrr_total'))} "
-            f"{_fmt_delta(row.get('mrr_delta_24h'), is_mrr=True)}"
+            f"{_fmt_delta(row.get('mrr_delta_24h') if row.get('mrr_total') is not None else None, is_mrr=True)}"
+        )
+        lines.append(
+            f"📈 ARR (на дату): ${_fmt_num(row.get('arr_total'))} "
+            f"{_fmt_delta(row.get('arr_delta_24h') if row.get('arr_total') is not None else None, is_mrr=True)}"
         )
         lines.append(
             f"💵 Revenue (месяц): ${_fmt_num(row.get('revenue_total'))} "
-            f"{_fmt_delta(row.get('revenue_per_day'), is_mrr=True)}"
+            f"{_fmt_delta(row.get('revenue_per_day') if row.get('revenue_total') is not None else None, is_mrr=True)}"
         )
         lines.append(
             f"📲 Installs (месяц): {_fmt_num(row.get('installs_total'))} "
-            f"{_fmt_delta(row.get('installs_delta_24h'))}"
+            f"{_fmt_delta(row.get('installs_delta_24h') if row.get('installs_total') is not None else None)}"
         )
-        conv_rate = row.get("conv_rate")
-        conv_text = f"{conv_rate:.2f}%" if conv_rate is not None else "N/A"
+        conv_text = _fmt_conversion(
+            row.get("conv_rate"), row.get("conv_to"), row.get("conv_from")
+        )
         lines.append(f"🔄 Conv. Install→Paid (месяц): {conv_text}")
         lines.append("")
 
-    total_conv_text = f"{total_conv:.2f}%" if total_conv is not None else "N/A"
+    if total_conv_counts is None:
+        total_conv_text = "N/A"
+    else:
+        total_conv_text = _fmt_conversion(
+            total_conv, total_conv_counts[0], total_conv_counts[1]
+        )
     lines.extend([
         "<b>Total</b>",
         (
             f"💰 Total MRR (на дату): ${_fmt_num(total_mrr)} "
-            f"{_fmt_delta(total_mrr_delta, is_mrr=True)}"
+            f"{_fmt_delta(total_mrr_delta if total_mrr is not None else None, is_mrr=True)}"
         ),
         (
             f"📈 Total ARR (на дату): ${_fmt_num(total_arr)} "
-            f"{_fmt_delta(total_arr_delta, is_mrr=True)}"
+            f"{_fmt_delta(total_arr_delta if total_arr is not None else None, is_mrr=True)}"
         ),
         (
             f"💵 Total Revenue (месяц): ${_fmt_num(total_revenue)} "
-            f"{_fmt_delta(total_revenue_per_day, is_mrr=True)}"
+            f"{_fmt_delta(total_revenue_per_day if total_revenue is not None else None, is_mrr=True)}"
         ),
         f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}",
         f"🔄 Total Conv. (месяц): {total_conv_text}",

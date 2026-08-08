@@ -28,6 +28,7 @@ from daily_report_contract import (
     DailyAppSlot,
     DailyMetricsSnapshot,
     IntegrityIssue,
+    MetricProvenance,
     load_daily_portfolio,
 )
 
@@ -109,38 +110,39 @@ def _parse_chart_metric(
         value = float(count_value)
     else:
         parsed_value = _parse_finite_number(metric["value"])
-        if parsed_value is None:
+        if parsed_value is None or parsed_value < 0:
             return None
         value = parsed_value
 
     daily_values: list[float] = []
     daily_dates: list[str] = []
     series = metric.get("data")
-    if isinstance(series, list) and series:
-        first_series = series[0]
-        if not isinstance(first_series, dict):
+    if not isinstance(series, list) or len(series) != 1:
+        return None
+    first_series = series[0]
+    if not isinstance(first_series, dict):
+        return None
+    values = first_series.get("values")
+    if not isinstance(values, list) or not values:
+        return None
+    for point in values:
+        if not isinstance(point, dict):
             return None
-        values = first_series.get("values")
-        if not isinstance(values, list):
+        point_date = _parse_point_date(point.get("x"))
+        if point_date is None:
             return None
-        for point in values:
-            if not isinstance(point, dict):
+        if chart_id == "installs":
+            point_count = _parse_count(point.get("y"))
+            if point_count is None:
                 return None
-            point_date = _parse_point_date(point.get("x"))
-            if point_date is None:
+            point_value = float(point_count)
+        else:
+            parsed_point = _parse_finite_number(point.get("y"))
+            if parsed_point is None or parsed_point < 0:
                 return None
-            if chart_id == "installs":
-                point_count = _parse_count(point.get("y"))
-                if point_count is None:
-                    return None
-                point_value = float(point_count)
-            else:
-                parsed_point = _parse_finite_number(point.get("y"))
-                if parsed_point is None:
-                    return None
-                point_value = parsed_point
-            daily_dates.append(point_date)
-            daily_values.append(point_value)
+            point_value = parsed_point
+        daily_dates.append(point_date)
+        daily_values.append(point_value)
     return ChartMetric(
         value=value,
         daily_values=tuple(daily_values),
@@ -220,10 +222,12 @@ def _fetch_chart(
         request_session = session or _get_session()
         resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
-            "Adapty API response: status=%s chart_id=%s body=%s",
+            "Adapty API response: status=%s chart_id=%s date_from=%s date_to=%s period_unit=%s",
             resp.status_code,
             chart_id,
-            resp.text[:500] if resp.text else "(empty)",
+            body["filters"]["date"][0],
+            body["filters"]["date"][1],
+            period_unit,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -279,9 +283,10 @@ def _fetch_conversion(
         request_session = session or _get_session()
         resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
-            "Adapty Conversion API response: status=%s body=%s",
+            "Adapty Conversion API response: status=%s date_from=%s date_to=%s metric=install_paid",
             resp.status_code,
-            resp.text[:500] if resp.text else "(empty)",
+            body["filters"]["date"][0],
+            body["filters"]["date"][1],
         )
         resp.raise_for_status()
         data = resp.json()
@@ -579,6 +584,56 @@ def _missing_app_row(
     }
 
 
+def _metric_provenance(
+    month_start: datetime,
+    previous_date: datetime,
+    report_date: datetime,
+) -> dict[str, MetricProvenance]:
+    expected = report_date.date().isoformat()
+    previous = previous_date.date().isoformat()
+    month = month_start.date().isoformat()
+
+    def analytics(
+        metric_id: str,
+        series_key: str,
+        date_from: str,
+    ) -> MetricProvenance:
+        return MetricProvenance(
+            endpoint_class="analytics",
+            metric_id=metric_id,
+            series_key=series_key,
+            date_from=date_from,
+            date_to=expected,
+            expected_date=expected,
+        )
+
+    mrr = analytics("mrr", "data.revenue", previous)
+    arr = analytics("arr", "data.revenue", previous)
+    revenue = analytics("revenue", "data.revenue", month)
+    installs = analytics("installs", "data.common", month)
+    conversion = MetricProvenance(
+        endpoint_class="conversion",
+        metric_id="install_paid",
+        series_key="value/value_from/value_to",
+        date_from=month,
+        date_to=expected,
+        expected_date=expected,
+    )
+    return {
+        "mrr_total": mrr,
+        "mrr_delta_24h": mrr,
+        "arr_total": arr,
+        "arr_delta_24h": arr,
+        "revenue_total": revenue,
+        "revenue_per_day": revenue,
+        "installs_total": installs,
+        "installs_delta_24h": installs,
+        "conv_rate": conversion,
+        "conv_from": conversion,
+        "conv_to": conversion,
+    }
+
+
 def fetch_daily_snapshot(
     report_date: Union[date, datetime, None] = None,
 ) -> DailyMetricsSnapshot:
@@ -668,6 +723,9 @@ def fetch_daily_snapshot(
                 results.append(validate_app_metrics(row))
 
     results.sort(key=lambda r: r["index"])
+    provenance = _metric_provenance(date_start_month, date_prev, date_target)
+    for row in results:
+        row["provenance"] = provenance
     return DailyMetricsSnapshot(
         rows=tuple(results),
         portfolio_issues=portfolio.issues,

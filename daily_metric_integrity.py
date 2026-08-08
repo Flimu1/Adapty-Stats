@@ -5,7 +5,7 @@ import logging
 import math
 from typing import Any, Mapping, Optional, Sequence
 
-from daily_report_contract import IntegrityIssue
+from daily_report_contract import IntegrityIssue, PORTFOLIO_VERSION
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,13 @@ def validate_app_metrics(row: dict[str, Any]) -> dict[str, Any]:
     """Return a validated copy, replacing only untrusted fields with ``None``."""
     result = dict(row)
     result["issues"] = tuple(row.get("issues", ()))
+
+    if all(result.get(field) is None for field in REPORT_VALUE_FIELDS) and any(
+        issue.metric is None
+        and (issue.code.startswith("config.") or issue.code.startswith("fetch."))
+        for issue in result["issues"]
+    ):
+        return result
 
     for field in MONETARY_FIELDS:
         parsed = _finite_number(result.get(field))
@@ -237,25 +244,60 @@ def emit_integrity_audit(
         issue_by_metric = {
             issue.metric: issue.code for issue in row.get("issues", ())
         }
+        root_issue = next(
+            (
+                issue.code
+                for issue in row.get("issues", ())
+                if issue.metric is None
+            ),
+            "none",
+        )
         for metric in REPORT_VALUE_FIELDS:
+            family = (
+                "revenue" if metric.startswith("revenue_")
+                else "installs" if metric.startswith("installs_")
+                else "conversion" if metric.startswith("conv_")
+                else metric
+            )
+            provenance = row.get("provenance", {}).get(metric)
+            endpoint = getattr(provenance, "endpoint_class", "unknown")
+            metric_id = getattr(provenance, "metric_id", "unknown")
+            series_key = getattr(provenance, "series_key", "unknown")
+            date_from = getattr(provenance, "date_from", "unknown")
+            date_to = getattr(provenance, "date_to", "unknown")
+            expected_date = getattr(provenance, "expected_date", report_date.isoformat())
+            portfolio_version = getattr(
+                provenance,
+                "portfolio_version",
+                PORTFOLIO_VERSION,
+            )
             logger.info(
-                "daily_metric_audit report_date=%s timezone=%s slot=%s app=%s metric=%s status=%s issue=%s",
+                "daily_metric_audit report_date=%s timezone=%s slot=%s app=%s metric=%s status=%s issue=%s endpoint=%s source=%s:%s date_from=%s date_to=%s expected_date=%s portfolio=%s",
                 report_date.isoformat(),
                 timezone,
                 int(row["index"]) + 1,
                 row["name"],
                 metric,
                 "valid" if row.get(metric) is not None else "invalid",
-                issue_by_metric.get(metric, "none"),
+                issue_by_metric.get(metric, issue_by_metric.get(family, root_issue)),
+                endpoint,
+                metric_id,
+                series_key,
+                date_from,
+                date_to,
+                expected_date,
+                portfolio_version,
             )
 
     for metric, is_valid in total_status.items():
         logger.info(
-            "daily_total_audit report_date=%s timezone=%s total_metric=%s status=%s",
+            "daily_total_audit report_date=%s timezone=%s total_metric=%s status=%s endpoint=derived source=canonical_sum expected_date=%s portfolio=%s",
             report_date.isoformat(),
             timezone,
             metric,
             "valid" if is_valid else "invalid",
+            report_date.isoformat(),
+            PORTFOLIO_VERSION,
         )
 
     for issue in portfolio_issues:

@@ -155,10 +155,13 @@ Telegram number.
 ### Portfolio Reconciliation
 
 - Each total is recomputed from the canonical application rows.
+- Monetary totals sum the cent-rounded values rendered for each application,
+  using decimal `ROUND_HALF_UP`, so the displayed total is arithmetically exact.
 - A total is numeric only when all three canonical application values required
   by that total are trusted.
 - Total conversion is `sum(value_to) / sum(value_from) * 100`; displayed
-  application percentages are never averaged.
+  application percentages are never averaged. Each application and total also
+  renders its raw `value_to/value_from` counts for direct reconciliation.
 - A zero summed conversion denominator produces `N/A`, not `0.00%`.
 - Every computed total is checked once more against the same displayed source
   values before formatting.

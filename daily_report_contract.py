@@ -13,6 +13,7 @@ CANONICAL_APP_NAMES = (
     "Granny Photos",
     "Otty: Couples&Relationships",
 )
+PORTFOLIO_VERSION = "daily-v1"
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,17 @@ class IntegrityIssue:
     message: str
     app_name: Optional[str] = None
     metric: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MetricProvenance:
+    endpoint_class: str
+    metric_id: str
+    series_key: str
+    date_from: str
+    date_to: str
+    expected_date: str
+    portfolio_version: str = PORTFOLIO_VERSION
 
 
 @dataclass(frozen=True)
@@ -100,7 +112,7 @@ def load_daily_portfolio(
 
     if any(
         re.fullmatch(
-            r"ADAPTY_(?:API_KEY_APP|APP_NAME_)(?:[4-9]|[1-9][0-9]+)",
+            r"ADAPTY_(?:API_KEY_APP(?:[4-9]|[1-9][0-9]+)(?:_SHA256)?|APP_NAME_(?:[4-9]|[1-9][0-9]+))",
             name,
         )
         for name in source

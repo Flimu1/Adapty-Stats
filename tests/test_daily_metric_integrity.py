@@ -2,7 +2,7 @@ from datetime import date
 import math
 import unittest
 
-from daily_report_contract import IntegrityIssue
+from daily_report_contract import IntegrityIssue, MetricProvenance
 
 
 def valid_row() -> dict:
@@ -126,6 +126,45 @@ class TestDailyMetricValidation(unittest.TestCase):
 
 
 class TestDailyMetricAudit(unittest.TestCase):
+    def test_root_fetch_issue_does_not_expand_into_repeated_field_problems(self):
+        from daily_metric_integrity import REPORT_VALUE_FIELDS, validate_app_metrics
+
+        root_issue = IntegrityIssue(
+            code="fetch.failed",
+            message="collection failed",
+            app_name="Otty: Couples&Relationships",
+        )
+        row = {
+            "index": 2,
+            "name": "Otty: Couples&Relationships",
+            **{field: None for field in REPORT_VALUE_FIELDS},
+            "issues": (root_issue,),
+            "is_visible": True,
+        }
+
+        result = validate_app_metrics(row)
+
+        self.assertEqual(result["issues"], (root_issue,))
+
+    def test_family_issue_code_is_attached_to_each_invalid_family_audit_field(self):
+        from daily_metric_integrity import emit_integrity_audit, validate_app_metrics
+
+        row = valid_row()
+        row.update(revenue_total=10.0, revenue_per_day=11.0)
+
+        with self.assertLogs("daily_metric_integrity", level="INFO") as captured:
+            emit_integrity_audit(
+                report_date=date(2026, 8, 6),
+                timezone="Europe/Minsk",
+                rows=(validate_app_metrics(row),),
+                total_status={},
+                portfolio_issues=(),
+            )
+
+        revenue_lines = [line for line in captured.output if "metric=revenue_" in line]
+        self.assertEqual(len(revenue_lines), 2)
+        self.assertTrue(all("issue=revenue.day_exceeds_mtd" in line for line in revenue_lines))
+
     def test_problem_count_deduplicates_issue_identity(self):
         from daily_metric_integrity import count_integrity_problems
 
@@ -145,6 +184,16 @@ class TestDailyMetricAudit(unittest.TestCase):
 
         row = valid_row()
         row["api_key"] = "sanitized-secret-key"
+        row["provenance"] = {
+            "mrr_total": MetricProvenance(
+                endpoint_class="analytics",
+                metric_id="mrr",
+                series_key="data.revenue",
+                date_from="2026-08-05",
+                date_to="2026-08-06",
+                expected_date="2026-08-06",
+            )
+        }
         validated = validate_app_metrics(row)
 
         with self.assertLogs("daily_metric_integrity", level="INFO") as captured:
@@ -161,6 +210,10 @@ class TestDailyMetricAudit(unittest.TestCase):
         self.assertIn("slot=1", output)
         self.assertIn("app=Unfollowers: Follow & Unfollow", output)
         self.assertIn("metric=mrr_total status=valid", output)
+        self.assertIn("endpoint=analytics", output)
+        self.assertIn("source=mrr:data.revenue", output)
+        self.assertIn("date_from=2026-08-05 date_to=2026-08-06", output)
+        self.assertIn("expected_date=2026-08-06 portfolio=daily-v1", output)
         self.assertIn("total_metric=revenue_total status=invalid", output)
         self.assertNotIn("sanitized-secret-key", output)
         self.assertNotIn("api_key", output)

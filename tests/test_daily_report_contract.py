@@ -80,6 +80,18 @@ class TestDailyPortfolioContract(unittest.TestCase):
             {"config.extra_slot", "config.visibility_override"},
         )
 
+    def test_orphan_extra_slot_fingerprint_is_flagged(self):
+        from daily_report_contract import load_daily_portfolio
+
+        portfolio = load_daily_portfolio({
+            "ADAPTY_API_KEY_APP4_SHA256": _fingerprint("orphan-key"),
+        })
+
+        self.assertIn(
+            "config.extra_slot",
+            {issue.code for issue in portfolio.issues},
+        )
+
     def test_wrong_key_fingerprint_blocks_fetch_without_exposing_hash_or_key(self):
         from daily_report_contract import CANONICAL_APP_NAMES, load_daily_portfolio
 

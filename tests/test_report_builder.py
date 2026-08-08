@@ -62,7 +62,9 @@ class TestReportBuilder(unittest.TestCase):
         self.assertIn("Total ARR (на дату): $7,200 (+$72)", result.text)
         self.assertIn("Total Revenue (месяц): $600 (+$60)", result.text)
         self.assertIn("Total Downloads (за сутки): (+600)", result.text)
-        self.assertIn("Total Conv. (месяц): 1.00%", result.text)
+        self.assertIn("ARR (на дату): $1,200 (+$12)", result.text)
+        self.assertIn("Conv. Install→Paid (месяц): 1.00% (1/100)", result.text)
+        self.assertIn("Total Conv. (месяц): 1.00% (6/600)", result.text)
         self.assertIn("✅ Проверка данных: пройдена", result.text)
         self.assertEqual(result.integrity_problem_count, 0)
 
@@ -78,8 +80,8 @@ class TestReportBuilder(unittest.TestCase):
 
         result = build_with_rows(rows)
 
-        self.assertIn("Revenue (месяц): $N/A (+$30)", result.text)
-        self.assertIn("Total Revenue (месяц): $N/A (+$60)", result.text)
+        self.assertIn("Revenue (месяц): $N/A (⚠️ N/A)", result.text)
+        self.assertIn("Total Revenue (месяц): $N/A (⚠️ N/A)", result.text)
         self.assertIn("⚠️ Проверка данных: обнаружено 1 проблем", result.text)
         self.assertIn("Total MRR (на дату): $600", result.text)
         self.assertEqual(result.integrity_problem_count, 1)
@@ -90,8 +92,8 @@ class TestReportBuilder(unittest.TestCase):
 
         text = build_with_rows(rows).text
 
-        self.assertIn("MRR (на дату): $N/A (+$3)", text)
-        self.assertIn("Total MRR (на дату): $N/A (+$6)", text)
+        self.assertIn("MRR (на дату): $N/A (⚠️ N/A)", text)
+        self.assertIn("Total MRR (на дату): $N/A (⚠️ N/A)", text)
         self.assertIn("Total Revenue (месяц): $600", text)
 
     def test_missing_mrr_delta_preserves_current_value(self):
@@ -109,19 +111,65 @@ class TestReportBuilder(unittest.TestCase):
 
         self.assertIn("Total Conv. (месяц): N/A", build_with_rows(rows).text)
 
-    def test_zero_conversion_counts_render_zero(self):
+    def test_zero_conversion_denominator_renders_na(self):
         rows = valid_rows()
         for row in rows:
             row.update(conv_rate=0.0, conv_from=0, conv_to=0)
 
-        self.assertIn("Total Conv. (месяц): 0.00%", build_with_rows(rows).text)
+        self.assertIn("Total Conv. (месяц): N/A (0/0)", build_with_rows(rows).text)
+
+    def test_missing_revenue_mtd_never_carries_numeric_daily_value(self):
+        rows = valid_rows()
+        rows[2]["revenue_total"] = None
+
+        text = build_with_rows(rows).text
+
+        self.assertIn("Revenue (месяц): $N/A (⚠️ N/A)", text)
+        self.assertIn("Total Revenue (месяц): $N/A (⚠️ N/A)", text)
 
     def test_total_conversion_uses_raw_counts_not_displayed_rates(self):
         rows = valid_rows()
         rows[0]["conv_rate"] = 99.99
         rows[1]["conv_rate"] = 0.01
 
-        self.assertIn("Total Conv. (месяц): 1.00%", build_with_rows(rows).text)
+        self.assertIn("Total Conv. (месяц): 1.00% (6/600)", build_with_rows(rows).text)
+
+    def test_money_totals_sum_the_same_cent_values_shown_per_app(self):
+        rows = valid_rows()
+        for row in rows:
+            row.update(
+                mrr_total=0.004,
+                mrr_delta_24h=0.004,
+                arr_total=0.004,
+                arr_delta_24h=0.004,
+                revenue_total=0.004,
+                revenue_per_day=0.004,
+            )
+
+        text = build_with_rows(rows).text
+
+        self.assertEqual(text.count("MRR (на дату): $0 (+$0)"), 4)
+        self.assertIn("Total ARR (на дату): $0 (+$0)", text)
+        self.assertIn("Total Revenue (месяц): $0 (+$0)", text)
+
+    def test_august_six_backfill_uses_canonical_installs_snapshot(self):
+        rows = valid_rows()
+        rows[0].update(
+            mrr_total=1272.87,
+            mrr_delta_24h=-104.63,
+            arr_total=15274.44,
+            arr_delta_24h=-1255.56,
+            revenue_total=262.99,
+            revenue_per_day=11.90,
+            installs_total=1793,
+            installs_delta_24h=321,
+        )
+
+        text = build_with_rows(rows).text
+
+        self.assertIn("📊 Отчёт на 06.08.2026", text)
+        self.assertIn("Installs (месяц): 1,793 (+321)", text)
+        self.assertNotIn("Installs (месяц): 1,784", text)
 
     def test_portfolio_only_issue_preserves_values_but_warns(self):
         issue = IntegrityIssue(code="config.extra_slot", message="APP4 ignored")

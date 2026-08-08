@@ -3,7 +3,7 @@
 from datetime import date, datetime
 import math
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import call, Mock, patch
 
 from daily_metric_integrity import REPORT_VALUE_FIELDS
 from daily_report_contract import (
@@ -106,6 +106,50 @@ class TestChartMetricParsing(unittest.TestCase):
         self.assertIsNone(_parse_chart_metric(boolean_value, "installs"))
         self.assertIsNone(_parse_chart_metric(non_finite, "mrr"))
         self.assertIsNone(_parse_chart_metric(fractional_installs, "installs"))
+
+    def test_rejects_missing_empty_or_ambiguous_daily_series(self):
+        from adapty_client import _parse_chart_metric
+
+        missing = {"data": {"revenue": {"value": 10.0}}}
+        empty = {"data": {"revenue": {"value": 10.0, "data": []}}}
+        ambiguous = {
+            "data": {
+                "revenue": {
+                    "value": 10.0,
+                    "data": [
+                        {"values": [{"x": "2026-08-06", "y": 5.0}]},
+                        {"values": [{"x": "2026-08-06", "y": 5.0}]},
+                    ],
+                }
+            }
+        }
+
+        self.assertIsNone(_parse_chart_metric(missing, "revenue"))
+        self.assertIsNone(_parse_chart_metric(empty, "revenue"))
+        self.assertIsNone(_parse_chart_metric(ambiguous, "revenue"))
+
+    def test_rejects_negative_monetary_summary_or_source_point(self):
+        from adapty_client import _parse_chart_metric
+
+        negative_summary = {
+            "data": {
+                "revenue": {
+                    "value": -1.0,
+                    "data": [{"values": [{"x": "2026-08-06", "y": 1.0}]}],
+                }
+            }
+        }
+        negative_point = {
+            "data": {
+                "revenue": {
+                    "value": 1.0,
+                    "data": [{"values": [{"x": "2026-08-06", "y": -1.0}]}],
+                }
+            }
+        }
+
+        self.assertIsNone(_parse_chart_metric(negative_summary, "mrr"))
+        self.assertIsNone(_parse_chart_metric(negative_point, "mrr"))
 
 
 class TestConversionMetricParsing(unittest.TestCase):
@@ -334,6 +378,48 @@ class TestAppSnapshot(unittest.TestCase):
 
 
 class TestRequestReliability(unittest.TestCase):
+    def test_fetch_logs_never_include_raw_response_bodies(self):
+        from adapty_client import _fetch_chart, _fetch_conversion
+
+        chart_response = Mock()
+        chart_response.status_code = 200
+        chart_response.text = "sensitive-chart-body"
+        chart_response.raise_for_status.return_value = None
+        chart_response.json.return_value = MRR_RESPONSE
+        conversion_response = Mock()
+        conversion_response.status_code = 200
+        conversion_response.text = "sensitive-conversion-body"
+        conversion_response.raise_for_status.return_value = None
+        conversion_response.json.return_value = CONVERSION_RESPONSE
+        session = Mock()
+        session.post.side_effect = [chart_response, conversion_response]
+
+        with self.assertLogs("adapty_client", level="DEBUG") as captured:
+            _fetch_chart(
+                "sanitized-key",
+                "https://api-admin.adapty.io",
+                "analytics/",
+                "Europe/Minsk",
+                "mrr",
+                datetime(2026, 8, 5),
+                datetime(2026, 8, 6),
+                session=session,
+            )
+            _fetch_conversion(
+                "sanitized-key",
+                "https://api-admin.adapty.io",
+                "conversion/",
+                "Europe/Minsk",
+                datetime(2026, 8, 1),
+                datetime(2026, 8, 6),
+                session=session,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("sensitive-chart-body", output)
+        self.assertNotIn("sensitive-conversion-body", output)
+        self.assertIn("chart_id=mrr", output)
+
     def test_session_retries_rate_limits_and_server_errors(self):
         from adapty_client import _get_session
 
@@ -414,6 +500,14 @@ class TestFetchDailySnapshot(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in rows], list(CANONICAL_APP_NAMES))
         self.assertEqual(snapshot.portfolio_issues, ())
+        mrr_provenance = rows[0]["provenance"]["mrr_total"]
+        self.assertEqual(mrr_provenance.endpoint_class, "analytics")
+        self.assertEqual(mrr_provenance.metric_id, "mrr")
+        self.assertEqual(mrr_provenance.series_key, "data.revenue")
+        self.assertEqual(mrr_provenance.date_from, "2026-08-05")
+        self.assertEqual(mrr_provenance.date_to, "2026-08-06")
+        self.assertEqual(mrr_provenance.expected_date, "2026-08-06")
+        self.assertEqual(mrr_provenance.portfolio_version, "daily-v1")
         failed = rows[1]
         self.assertTrue(all(failed[field] is None for field in REPORT_VALUE_FIELDS))
         self.assertIn("fetch.failed", {issue.code for issue in failed["issues"]})
