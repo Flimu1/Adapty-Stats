@@ -75,12 +75,14 @@ class TestTelegramSender(unittest.TestCase):
         self.assertIn("ConnectionError", output)
 
     @patch("report_delivery.send_followup_reports", return_value=(["A/B", "Apple Ads"], []))
+    @patch("telegram_sender.get_telegram_admin_id", return_value=None)
     @patch("telegram_sender.send_message", return_value=True)
     @patch("report_builder.build_report")
     def test_test_send_sends_main_report_to_group_and_followups(
         self,
         mock_build_report,
         mock_send,
+        _mock_admin,
         mock_followups,
     ):
         from datetime import date
@@ -91,6 +93,7 @@ class TestTelegramSender(unittest.TestCase):
             text="Main report",
             report_date=date(2026, 6, 4),
             anomalies=[],
+            integrity_problem_count=0,
         )
 
         self.assertTrue(test_send())
@@ -99,12 +102,14 @@ class TestTelegramSender(unittest.TestCase):
         mock_followups.assert_called_once_with(date(2026, 6, 4))
 
     @patch("report_delivery.send_followup_reports")
+    @patch("telegram_sender.get_telegram_admin_id", return_value=None)
     @patch("telegram_sender.send_message", return_value=True)
     @patch("report_builder.build_report")
     def test_test_send_skips_followups_when_main_report_send_fails(
         self,
         mock_build_report,
         mock_send,
+        _mock_admin,
         mock_followups,
     ):
         from datetime import date
@@ -115,12 +120,46 @@ class TestTelegramSender(unittest.TestCase):
             text="Main report",
             report_date=date(2026, 6, 4),
             anomalies=[],
+            integrity_problem_count=0,
         )
         mock_send.return_value = False
 
         self.assertFalse(test_send())
         mock_send.assert_called_once_with("Main report")
         mock_followups.assert_not_called()
+
+    @patch("report_delivery.send_followup_reports", return_value=(["A/B", "Apple Ads"], []))
+    @patch("telegram_sender.get_telegram_admin_id", return_value="42")
+    @patch("telegram_sender.send_message", return_value=True)
+    @patch("report_builder.build_report")
+    def test_test_send_delivers_partial_report_followups_and_integrity_alert(
+        self,
+        mock_build_report,
+        mock_send,
+        _mock_admin,
+        mock_followups,
+    ):
+        from datetime import date
+        from report_builder import ReportBuildResult
+        from telegram_sender import test_send
+
+        mock_build_report.return_value = ReportBuildResult(
+            text="Partial main report",
+            report_date=date(2026, 8, 6),
+            anomalies=["Otty: Revenue invalid"],
+            integrity_problem_count=1,
+        )
+
+        self.assertTrue(test_send())
+
+        self.assertEqual(mock_send.call_args_list[0].args[0], "Partial main report")
+        admin_calls = [
+            call for call in mock_send.call_args_list
+            if call.kwargs.get("chat_id") == "42"
+        ]
+        self.assertEqual(len(admin_calls), 1)
+        self.assertIn("Otty: Revenue invalid", admin_calls[0].args[0])
+        mock_followups.assert_called_once_with(date(2026, 8, 6))
 
 
 if __name__ == "__main__":

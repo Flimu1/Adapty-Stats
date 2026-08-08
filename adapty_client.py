@@ -9,7 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Optional, Union
+from decimal import Decimal, InvalidOperation
+from typing import Any, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import requests
@@ -23,6 +24,14 @@ from config import (
     get_adapty_conversion_path,
     get_adapty_timezone,
 )
+from daily_metric_integrity import REPORT_VALUE_FIELDS, validate_app_metrics
+from daily_report_contract import (
+    DailyAppSlot,
+    DailyMetricsSnapshot,
+    IntegrityIssue,
+    MetricProvenance,
+    load_daily_portfolio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +40,8 @@ logger = logging.getLogger(__name__)
 class ChartMetric:
     """Summary and daily series returned by one Adapty analytics chart."""
 
-    value: float
-    daily_values: tuple[float, ...]
+    value: Union[int, float]
+    daily_values: tuple[Union[int, float], ...]
     daily_dates: tuple[str, ...]
 
 
@@ -67,8 +76,20 @@ def _parse_finite_number(value: Any) -> Optional[float]:
 
 def _parse_count(value: Any) -> Optional[int]:
     """Parse a non-negative mathematical integer without truncation."""
-    number = _parse_finite_number(value)
-    if number is None or number < 0 or not number.is_integer():
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        # JSON floats can be rounded before validation; counts must be exact.
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if (
+        not number.is_finite()
+        or number < 0
+        or number != number.to_integral_value()
+    ):
         return None
     return int(number)
 
@@ -84,9 +105,11 @@ def _parse_point_date(value: Any) -> Optional[str]:
 
 
 def _parse_chart_metric(
-    payload: dict[str, Any], chart_id: str
+    payload: Any, chart_id: str
 ) -> Optional[ChartMetric]:
     """Parse the summary and daily points without falling back to net proceeds."""
+    if not isinstance(payload, dict):
+        return None
     data = payload.get("data")
     if not isinstance(data, dict):
         return None
@@ -99,41 +122,42 @@ def _parse_chart_metric(
         count_value = _parse_count(metric["value"])
         if count_value is None:
             return None
-        value = float(count_value)
+        value = count_value
     else:
         parsed_value = _parse_finite_number(metric["value"])
-        if parsed_value is None:
+        if parsed_value is None or (chart_id != "revenue" and parsed_value < 0):
             return None
         value = parsed_value
 
-    daily_values: list[float] = []
+    daily_values: list[Union[int, float]] = []
     daily_dates: list[str] = []
     series = metric.get("data")
-    if isinstance(series, list) and series:
-        first_series = series[0]
-        if not isinstance(first_series, dict):
+    if not isinstance(series, list) or len(series) != 1:
+        return None
+    first_series = series[0]
+    if not isinstance(first_series, dict):
+        return None
+    values = first_series.get("values")
+    if not isinstance(values, list) or not values:
+        return None
+    for point in values:
+        if not isinstance(point, dict):
             return None
-        values = first_series.get("values")
-        if not isinstance(values, list):
+        point_date = _parse_point_date(point.get("x"))
+        if point_date is None:
             return None
-        for point in values:
-            if not isinstance(point, dict):
+        if chart_id == "installs":
+            point_count = _parse_count(point.get("y"))
+            if point_count is None:
                 return None
-            point_date = _parse_point_date(point.get("x"))
-            if point_date is None:
+            point_value = point_count
+        else:
+            parsed_point = _parse_finite_number(point.get("y"))
+            if parsed_point is None or (chart_id != "revenue" and parsed_point < 0):
                 return None
-            if chart_id == "installs":
-                point_count = _parse_count(point.get("y"))
-                if point_count is None:
-                    return None
-                point_value = float(point_count)
-            else:
-                parsed_point = _parse_finite_number(point.get("y"))
-                if parsed_point is None:
-                    return None
-                point_value = parsed_point
-            daily_dates.append(point_date)
-            daily_values.append(point_value)
+            point_value = parsed_point
+        daily_dates.append(point_date)
+        daily_values.append(point_value)
     return ChartMetric(
         value=value,
         daily_values=tuple(daily_values),
@@ -141,8 +165,10 @@ def _parse_chart_metric(
     )
 
 
-def _parse_conversion_metric(payload: dict[str, Any]) -> Optional[ConversionMetric]:
+def _parse_conversion_metric(payload: Any) -> Optional[ConversionMetric]:
     """Parse Adapty's percentage and the raw counts used to calculate it."""
+    if not isinstance(payload, dict):
+        return None
     if payload.get("metric_name") != "install_paid":
         return None
     value = _parse_finite_number(payload.get("value"))
@@ -213,13 +239,15 @@ def _fetch_chart(
         request_session = session or _get_session()
         resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
-            "Adapty API response: status=%s chart_id=%s body=%s",
+            "Adapty API response: status=%s chart_id=%s date_from=%s date_to=%s period_unit=%s",
             resp.status_code,
             chart_id,
-            resp.text[:500] if resp.text else "(empty)",
+            body["filters"]["date"][0],
+            body["filters"]["date"][1],
+            period_unit,
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = resp.json(parse_float=Decimal)
     except requests.RequestException as e:
         logger.exception("Adapty API request failed (chart_id=%s): %s", chart_id, e)
         return None
@@ -229,10 +257,11 @@ def _fetch_chart(
 
     metric = _parse_chart_metric(data, chart_id)
     if metric is None:
-        data_obj = data.get("data")
+        data_obj = data.get("data") if isinstance(data, dict) else None
         logger.warning(
-            "Adapty API: gross metric not found for chart_id=%s, data keys=%s",
+            "Adapty API: unsupported metric payload chart_id=%s payload_type=%s data_keys=%s",
             chart_id,
+            type(data).__name__,
             list(data_obj.keys()) if isinstance(data_obj, dict) else [],
         )
     return metric
@@ -272,12 +301,13 @@ def _fetch_conversion(
         request_session = session or _get_session()
         resp = request_session.post(url, json=body, headers=headers, timeout=30)
         logger.debug(
-            "Adapty Conversion API response: status=%s body=%s",
+            "Adapty Conversion API response: status=%s date_from=%s date_to=%s metric=install_paid",
             resp.status_code,
-            resp.text[:500] if resp.text else "(empty)",
+            body["filters"]["date"][0],
+            body["filters"]["date"][1],
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = resp.json(parse_float=Decimal)
     except requests.RequestException as e:
         logger.exception("Adapty Conversion API request failed: %s", e)
         return None
@@ -294,10 +324,9 @@ def _fetch_conversion(
 def _debug_conversion_response() -> None:
     """
     Запрос Conversion API (Install→Paid) для первого приложения.
-    Выводит сырой ответ для сверки с дашбордом Adapty.
+    Выводит только безопасную структуру ответа для сверки с дашбордом Adapty.
     Запуск: python main.py --debug-conversion
     """
-    import json
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
     path = get_adapty_conversion_path()
@@ -338,23 +367,21 @@ def _debug_conversion_response() -> None:
     }
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=30)
-        print("Raw response status:", resp.status_code)
-        print("Raw response body:")
-        if resp.text:
-            try:
-                j = resp.json()
-                print(json.dumps(j, indent=2, ensure_ascii=False))
-            except Exception:
-                print(resp.text[:2000])
+        print("Response status:", resp.status_code)
+        try:
+            payload = resp.json()
+        except ValueError:
+            print("Payload type: invalid-json")
         else:
-            print("(empty)")
-    except Exception as e:
-        print("Request failed:", e)
+            print("Payload type:", type(payload).__name__)
+            print("Top-level keys:", sorted(payload) if isinstance(payload, dict) else [])
+    except requests.RequestException as error:
+        print("Request failed:", type(error).__name__)
 
 
 def _debug_adapty_response() -> None:
     """
-    Выполняет один запрос к Adapty (MRR для первого приложения) и выводит сырой ответ.
+    Выполняет запросы к Adapty и выводит только безопасную структуру ответа.
     Запуск: python main.py --debug-adapty (или LOG_LEVEL=DEBUG python main.py --test-send).
     Даты запроса — в timezone отчёта (по умолчанию Europe/Minsk, GMT+3).
     """
@@ -391,29 +418,19 @@ def _debug_adapty_response() -> None:
         try:
             resp = requests.post(url, json=body_chart, headers=headers, timeout=30)
             print("Status:", resp.status_code)
-            # Показываем только ключи верхнего уровня и data.*
-            if resp.ok and resp.text:
-                try:
-                    j = resp.json()
-                    d = j.get("data") or {}
-                    keys = list(d.keys()) if isinstance(d, dict) else []
-                    print("data keys:", keys)
-                    for k in keys[:3]:  # первые 3 ключа и их value
-                        v = d.get(k)
-                        if isinstance(v, dict):
-                            print(f"  {k}.value =", v.get("value"))
-                        else:
-                            print(f"  {k} =", type(v).__name__)
-                    if len(resp.text) < 1500:
-                        print("Response:", resp.text[:1500])
-                    else:
-                        print("Response (first 800 chars):", resp.text[:800], "...")
-                except Exception:
-                    print("Response (raw):", resp.text[:1500])
+            try:
+                payload = resp.json()
+            except ValueError:
+                print("Payload type: invalid-json")
             else:
-                print("Response:", resp.text[:500] if resp.text else "(empty)")
-        except Exception as e:
-            print("Request failed:", e)
+                data_obj = payload.get("data") if isinstance(payload, dict) else None
+                print("Payload type:", type(payload).__name__)
+                print(
+                    "data keys:",
+                    sorted(data_obj) if isinstance(data_obj, dict) else [],
+                )
+        except requests.RequestException as error:
+            print("Request failed:", type(error).__name__)
         print()
 
 
@@ -443,10 +460,10 @@ def _last_value(
     return metric.daily_values[-1]
 
 
-def _last_delta(
+def _exact_current_and_delta(
     metric: Optional[ChartMetric], previous_date: datetime, report_date: datetime
-) -> Optional[float]:
-    """Return a delta only for the two exact requested calendar dates."""
+) -> tuple[Optional[float], Optional[float]]:
+    """Return current and delta only for the exact requested date pair."""
     expected_dates = (
         previous_date.strftime("%Y-%m-%d"),
         report_date.strftime("%Y-%m-%d"),
@@ -457,8 +474,9 @@ def _last_delta(
         or len(metric.daily_dates) < 2
         or metric.daily_dates[-2:] != expected_dates
     ):
-        return None
-    return metric.daily_values[-1] - metric.daily_values[-2]
+        return None, None
+    current = metric.daily_values[-1]
+    return current, current - metric.daily_values[-2]
 
 
 def _fetch_app_snapshot(
@@ -534,19 +552,25 @@ def _fetch_app_snapshot(
 
     installs_total = int(installs.value) if installs is not None else None
     installs_today = _last_value(installs, report_date)
+    mrr_total, mrr_delta = _exact_current_and_delta(
+        mrr, previous_date, report_date
+    )
+    arr_total, arr_delta = _exact_current_and_delta(
+        arr, previous_date, report_date
+    )
     return {
         "index": app_index,
         "name": app_name,
-        "mrr_total": _last_value(mrr, report_date),
-        "mrr_delta_24h": _last_delta(mrr, previous_date, report_date),
+        "mrr_total": mrr_total,
+        "mrr_delta_24h": mrr_delta,
         "installs_total": installs_total,
         "installs_delta_24h": (
             int(installs_today) if installs_today is not None else None
         ),
         "revenue_total": revenue.value if revenue is not None else None,
         "revenue_per_day": _last_value(revenue, report_date),
-        "arr_total": _last_value(arr, report_date),
-        "arr_delta_24h": _last_delta(arr, previous_date, report_date),
+        "arr_total": arr_total,
+        "arr_delta_24h": arr_delta,
         "conv_rate": conversion.value if conversion is not None else None,
         "conv_from": conversion.value_from if conversion is not None else None,
         "conv_to": conversion.value_to if conversion is not None else None,
@@ -554,18 +578,92 @@ def _fetch_app_snapshot(
     }
 
 
-def fetch_all_metrics(
+def _missing_app_row(
+    slot: DailyAppSlot,
+    issues: Sequence[IntegrityIssue],
+    *,
+    request_status: str = "not_requested",
+) -> dict[str, Any]:
+    relevant_issues = tuple(
+        issue
+        for issue in issues
+        if issue.app_name == slot.name
+    )
+    return {
+        "index": slot.index,
+        "name": slot.name,
+        **{field: None for field in REPORT_VALUE_FIELDS},
+        "issues": relevant_issues,
+        "is_visible": True,
+        "_request_status": request_status,
+    }
+
+
+def _metric_provenance(
+    month_start: datetime,
+    previous_date: datetime,
+    report_date: datetime,
+    request_status: str = "attempted",
+) -> dict[str, MetricProvenance]:
+    expected = report_date.date().isoformat()
+    previous = previous_date.date().isoformat()
+    month = month_start.date().isoformat()
+
+    def analytics(
+        metric_id: str,
+        series_key: str,
+        date_from: str,
+    ) -> MetricProvenance:
+        return MetricProvenance(
+            endpoint_class="analytics",
+            metric_id=metric_id,
+            series_key=series_key,
+            date_from=date_from,
+            date_to=expected,
+            expected_date=expected,
+            request_status=request_status,
+        )
+
+    mrr = analytics("mrr", "data.revenue", previous)
+    arr = analytics("arr", "data.revenue", previous)
+    revenue = analytics("revenue", "data.revenue", month)
+    installs = analytics("installs", "data.common", month)
+    conversion = MetricProvenance(
+        endpoint_class="conversion",
+        metric_id="install_paid",
+        series_key="value/value_from/value_to",
+        date_from=month,
+        date_to=expected,
+        expected_date=expected,
+        request_status=request_status,
+    )
+    return {
+        "mrr_total": mrr,
+        "mrr_delta_24h": mrr,
+        "arr_total": arr,
+        "arr_delta_24h": arr,
+        "revenue_total": revenue,
+        "revenue_per_day": revenue,
+        "installs_total": installs,
+        "installs_delta_24h": installs,
+        "conv_rate": conversion,
+        "conv_from": conversion,
+        "conv_to": conversion,
+    }
+
+
+def fetch_daily_snapshot(
     report_date: Union[date, datetime, None] = None,
-) -> list[dict[str, Any]]:
+) -> DailyMetricsSnapshot:
     """
-    Собирает метрики по всем приложениям параллельно.
+    Собирает метрики только по трём каноническим приложениям параллельно.
     По умолчанию строит отчёт за текущий день (в timezone данных Adapty).
     - MRR и ARR: текущая точка и дельта из одного двухдневного ряда.
     - Revenue и Installs: MTD summary и последний дневной point одного ответа.
     - Conversion: процент и raw counts одного MTD ответа.
-    Возвращает полный снимок для построителя отчёта.
+    Возвращает типизированный снимок вместе с проблемами конфигурации.
     """
-    apps = get_adapty_apps()
+    portfolio = load_daily_portfolio()
     base_url = get_adapty_base_url()
     path = get_adapty_analytics_path()
     conversion_path = get_adapty_conversion_path()
@@ -592,7 +690,11 @@ def fetch_all_metrics(
     date_target = datetime(target_date.year, target_date.month, target_date.day)
     date_prev = datetime(prev_date.year, prev_date.month, prev_date.day)
 
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = [
+        validate_app_metrics(_missing_app_row(slot, portfolio.issues))
+        for slot in portfolio.slots
+        if slot.api_key is None
+    ]
 
     def job(
         app_index: int, app_key: str, app_name: str, is_visible: bool
@@ -611,35 +713,54 @@ def fetch_all_metrics(
             report_date=date_target,
         )
 
-    with ThreadPoolExecutor(max_workers=min(len(apps), 6)) as executor:
-        futures = {
-            executor.submit(job, i, app.api_key, app.name, app.is_visible): i
-            for i, app in enumerate(apps)
-        }
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                logger.exception("Failed to fetch app metrics: %s", e)
-                idx = futures[future]
-                results.append(
-                    {
-                        "index": idx,
-                        "name": apps[idx].name,
-                        "mrr_total": None,
-                        "mrr_delta_24h": None,
-                        "installs_total": None,
-                        "installs_delta_24h": None,
-                        "revenue_total": None,
-                        "revenue_per_day": None,
-                        "arr_total": None,
-                        "arr_delta_24h": None,
-                        "conv_rate": None,
-                        "conv_from": None,
-                        "conv_to": None,
-                        "is_visible": apps[idx].is_visible,
-                    }
-                )
+    fetchable_slots = [slot for slot in portfolio.slots if slot.api_key is not None]
+    if fetchable_slots:
+        with ThreadPoolExecutor(max_workers=min(len(fetchable_slots), 6)) as executor:
+            futures = {
+                executor.submit(
+                    job,
+                    slot.index,
+                    slot.api_key,
+                    slot.name,
+                    True,
+                ): slot
+                for slot in fetchable_slots
+            }
+            for future in as_completed(futures):
+                slot = futures[future]
+                try:
+                    row = future.result()
+                except Exception as error:
+                    logger.exception("Failed to fetch app metrics: %s", error)
+                    fetch_issue = IntegrityIssue(
+                        code="fetch.failed",
+                        message=f"{slot.name}: metric collection failed",
+                        app_name=slot.name,
+                    )
+                    row = _missing_app_row(
+                        slot,
+                        (fetch_issue,),
+                        request_status="attempted",
+                    )
+                results.append(validate_app_metrics(row))
 
     results.sort(key=lambda r: r["index"])
-    return results
+    for row in results:
+        request_status = row.pop("_request_status", "attempted")
+        row["provenance"] = _metric_provenance(
+            date_start_month,
+            date_prev,
+            date_target,
+            request_status=request_status,
+        )
+    return DailyMetricsSnapshot(
+        rows=tuple(results),
+        portfolio_issues=portfolio.issues,
+    )
+
+
+def fetch_all_metrics(
+    report_date: Union[date, datetime, None] = None,
+) -> list[dict[str, Any]]:
+    """Compatibility wrapper for callers that still consume a row list."""
+    return list(fetch_daily_snapshot(report_date).rows)

@@ -1,59 +1,72 @@
-"""
-Сбор данных по всем приложениям, расчёт дельт, форматирование текста отчёта для Telegram.
-"""
+"""Build a canonical, integrity-aware daily Adapty report for Telegram."""
+
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional, Union
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
-from adapty_client import fetch_all_metrics
+from adapty_client import fetch_daily_snapshot
 from config import get_adapty_timezone
+from daily_metric_integrity import (
+    count_integrity_problems,
+    emit_integrity_audit,
+)
+from daily_report_contract import IntegrityIssue
 
 
 @dataclass
 class ReportBuildResult:
-    """Готовый отчёт + служебные данные для отправки и алертов."""
+    """Rendered report together with safe details used by delivery alerts."""
 
     text: str
     report_date: date
     anomalies: list[str]
+    integrity_problem_count: int = 0
 
 
-def _fmt_num(n: Union[float, int, None]) -> str:
-    """Форматирование числа с запятыми как разделителями тысяч (1,234)."""
+_CENT = Decimal("0.01")
+
+
+def _round_money(value: Union[float, int, Decimal]) -> Decimal:
+    return Decimal(str(value)).quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def _fmt_num(n: Union[float, int, Decimal, None]) -> str:
     if n is None:
         return "N/A"
-    if isinstance(n, float):
-        if n == int(n):
-            n = int(n)
-        else:
-            return f"{n:,.2f}"
-    return f"{int(n):,}"
+    value = _round_money(n)
+    if value == value.to_integral_value():
+        return f"{int(value):,}"
+    return f"{value:,.2f}"
 
 
-def _fmt_delta(delta: Union[float, None], is_mrr: bool = False) -> str:
-    """Знак +/− и значение в скобках; для MRR — с символом $.
-    При None возвращает (⚠️ N/A)."""
+def _fmt_delta(delta: Union[float, int, None], is_mrr: bool = False) -> str:
     if delta is None:
         return "(⚠️ N/A)"
-    prefix = "+" if delta >= 0 else ""
     if is_mrr:
-        rounded = round(float(delta), 2)
+        rounded = _round_money(delta)
         sign = "+" if rounded >= 0 else "-"
         return f"({sign}${_fmt_num(abs(rounded))})"
+    prefix = "+" if delta >= 0 else ""
     return f"({prefix}{_fmt_num(int(delta))})"
 
 
-def _sum_complete(rows: list[dict], key: str) -> Optional[float]:
-    """Sum a metric only when every displayed application supplied it."""
+def _sum_complete_int(rows: Sequence[dict], key: str) -> Optional[int]:
     values = [row.get(key) for row in rows]
     if not values or any(value is None for value in values):
         return None
-    return sum(float(value) for value in values)
+    return sum(int(value) for value in values)
+
+
+def _sum_displayed_money(rows: Sequence[dict], key: str) -> Optional[Decimal]:
+    values = [row.get(key) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    return sum((_round_money(value) for value in values), start=Decimal("0.00"))
 
 
 def _escape_html(text: str) -> str:
-    """Экранирование HTML-символов для безопасной отправки в Telegram."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -61,7 +74,6 @@ def _resolve_report_date(
     report_date: Union[date, datetime, None],
     tz: ZoneInfo,
 ) -> date:
-    """Дата отчёта: по умолчанию текущий день в timezone данных Adapty."""
     if report_date is None:
         return datetime.now(tz).date()
     if isinstance(report_date, datetime):
@@ -69,202 +81,177 @@ def _resolve_report_date(
     return report_date
 
 
-def _detect_anomalies(rows: list[dict]) -> list[str]:
-    """
-    Базовые валидации данных перед отправкой отчёта.
-    Держим только надёжные правила, чтобы не плодить ложные тревоги.
-    """
-    anomalies: list[str] = []
-    for r in rows:
-        name = str(r.get("name", "App"))
-        mrr_total = r.get("mrr_total")
-        mrr_delta = r.get("mrr_delta_24h")
-        arr_total = r.get("arr_total")
-        arr_delta = r.get("arr_delta_24h")
-        revenue_total = r.get("revenue_total")
-        revenue_day = r.get("revenue_per_day")
-        inst_total = r.get("installs_total")
-        inst_delta = r.get("installs_delta_24h")
-        conv_rate = r.get("conv_rate")
-        conv_from = r.get("conv_from")
-        conv_to = r.get("conv_to")
+def _issue_details(
+    rows: Sequence[dict],
+    portfolio_issues: Sequence[IntegrityIssue],
+) -> list[str]:
+    details: list[str] = []
+    seen: set[tuple[str, Optional[str], Optional[str]]] = set()
+    for issue in (
+        *portfolio_issues,
+        *(issue for row in rows for issue in row.get("issues", ())),
+    ):
+        identity = (issue.code, issue.app_name, issue.metric)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        prefix = f"{issue.app_name}: " if issue.app_name else ""
+        details.append(f"{prefix}{issue.message} [{issue.code}]")
+    return details
 
-        required_fields = (
-            ("MRR", mrr_total),
-            ("MRR delta", mrr_delta),
-            ("ARR", arr_total),
-            ("ARR delta", arr_delta),
-            ("Revenue MTD", revenue_total),
-            ("Revenue day", revenue_day),
-            ("Installs MTD", inst_total),
-            ("Installs day", inst_delta),
-            ("Conversion", conv_rate),
-            ("Conversion eligible", conv_from),
-            ("Conversion paid", conv_to),
-        )
-        missing_fields = [label for label, value in required_fields if value is None]
-        if missing_fields:
-            msg = f"{name}: отсутствуют поля ({', '.join(missing_fields)})."
-            if len(missing_fields) == len(required_fields):
-                app_num = r.get("index", 0) + 1
-                msg += f" Возможная причина: 401 Unauthorized — проверьте ADAPTY_API_KEY_APP{app_num}."
-            anomalies.append(msg)
 
-        if mrr_total is not None and mrr_total < 0:
-            anomalies.append(f"{name}: MRR отрицательный ({mrr_total:.2f}).")
-        if arr_total is not None and arr_total < 0:
-            anomalies.append(f"{name}: ARR отрицательный ({arr_total:.2f}).")
-        if revenue_total is not None and revenue_total < 0:
-            anomalies.append(
-                f"{name}: Revenue за месяц отрицательный ({revenue_total:.2f})."
-            )
-        if revenue_day is not None and revenue_day < 0:
-            anomalies.append(
-                f"{name}: Revenue за сутки отрицательный ({revenue_day:.2f})."
-            )
-        if inst_total is not None and inst_total < 0:
-            anomalies.append(f"{name}: Installs за месяц отрицательные ({inst_total}).")
-        if inst_delta is not None and inst_delta < 0:
-            anomalies.append(f"{name}: Installs за сутки отрицательные ({inst_delta}).")
-        if (
-            inst_total is not None
-            and inst_delta is not None
-            and int(inst_delta) > int(inst_total)
-        ):
-            anomalies.append(
-                f"{name}: installs за сутки ({inst_delta}) больше, чем MTD ({inst_total})."
-            )
-        if conv_rate is not None and not 0 <= conv_rate <= 100:
-            anomalies.append(
-                f"{name}: Conversion вне диапазона 0–100% ({conv_rate:.2f})."
-            )
-        if conv_from is not None and conv_from < 0:
-            anomalies.append(
-                f"{name}: eligible installs конверсии отрицательные ({conv_from})."
-            )
-        if conv_to is not None and conv_to < 0:
-            anomalies.append(
-                f"{name}: paid users конверсии отрицательные ({conv_to})."
-            )
-        if conv_from is not None and conv_to is not None and conv_to > conv_from:
-            anomalies.append(
-                f"{name}: paid users ({conv_to}) больше eligible installs ({conv_from})."
-            )
-    return anomalies
+def _total_conversion(rows: Sequence[dict]) -> Optional[float]:
+    total_from = _sum_complete_int(rows, "conv_from")
+    total_to = _sum_complete_int(rows, "conv_to")
+    if total_from is None or total_to is None:
+        return None
+    if total_from == 0:
+        return None
+    return total_to / total_from * 100
+
+
+def _conversion_counts(rows: Sequence[dict]) -> Optional[tuple[int, int]]:
+    total_from = _sum_complete_int(rows, "conv_from")
+    total_to = _sum_complete_int(rows, "conv_to")
+    if total_from is None or total_to is None:
+        return None
+    return int(total_to), int(total_from)
+
+
+def _fmt_conversion(
+    rate: Optional[float],
+    converted: Optional[Union[float, int]],
+    installed: Optional[Union[float, int]],
+) -> str:
+    if converted is None or installed is None:
+        return "N/A"
+    counts = f"({int(converted):,}/{int(installed):,})"
+    if rate is None or int(installed) == 0:
+        return f"N/A {counts}"
+    return f"{float(rate):.2f}% {counts}"
 
 
 def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuildResult:
-    """
-    Запрашивает метрики у Adapty и формирует текст отчёта в формате:
-    📊 Отчёт на ДД.ММ.ГГГГ
-    **App Name**
-    💰 MRR: $1,234 (+$56) — текущая дневная точка и изменение к предыдущей
-    📲 Installs: 5,678 (+120) — MTD summary и последняя дневная точка
-    """
+    """Collect one validated snapshot and render only trusted numeric fields."""
     try:
         tz = ZoneInfo(get_adapty_timezone())
     except Exception:
-        tz = ZoneInfo("UTC")
+        tz = ZoneInfo("Europe/Minsk")
     resolved_report_date = _resolve_report_date(report_date, tz)
     snapshot_time = datetime.now(tz).strftime("%H:%M")
     snapshot_tz = getattr(tz, "key", "Europe/Minsk")
-    all_rows = fetch_all_metrics(report_date=resolved_report_date)
-    rows = [row for row in all_rows if row.get("is_visible", True)]
-    anomalies = _detect_anomalies(rows)
-    date_str = resolved_report_date.strftime("%d.%m.%Y")
+
+    snapshot = fetch_daily_snapshot(report_date=resolved_report_date)
+    rows = list(snapshot.rows)
+    anomalies = _issue_details(rows, snapshot.portfolio_issues)
+    problem_count = count_integrity_problems(rows, snapshot.portfolio_issues)
+
+    total_mrr = _sum_displayed_money(rows, "mrr_total")
+    total_mrr_delta = _sum_displayed_money(rows, "mrr_delta_24h")
+    total_arr = _sum_displayed_money(rows, "arr_total")
+    total_arr_delta = _sum_displayed_money(rows, "arr_delta_24h")
+    total_revenue = _sum_displayed_money(rows, "revenue_total")
+    total_revenue_per_day = _sum_displayed_money(rows, "revenue_per_day")
+    total_inst_delta = _sum_complete_int(rows, "installs_delta_24h")
+    total_conv = _total_conversion(rows)
+    total_conv_counts = _conversion_counts(rows)
+
     lines = [
-        f"📊 Отчёт на {date_str}",
+        f"📊 Отчёт на {resolved_report_date.strftime('%d.%m.%Y')}",
         f"🕒 Срез на {snapshot_time} ({snapshot_tz})",
         "",
     ]
     if anomalies:
-        lines.append("⚠️ <b>Обнаружены аномалии в данных, проверьте источники</b>")
+        lines.append("⚠️ <b>Проверка данных обнаружила проблемы</b>")
         for anomaly in anomalies[:5]:
             detail = _escape_html(anomaly)
             if len(detail) > 300:
                 detail = f"{detail[:297]}..."
             lines.append(f"• {detail}")
         if len(anomalies) > 5:
-            lines.append(f"• Ещё аномалий: {len(anomalies) - 5}")
+            lines.append(f"• Ещё проблем: {len(anomalies) - 5}")
         lines.append("")
-    total_mrr = _sum_complete(rows, "mrr_total")
-    total_mrr_delta = _sum_complete(rows, "mrr_delta_24h")
-    total_arr = _sum_complete(rows, "arr_total")
-    total_arr_delta = _sum_complete(rows, "arr_delta_24h")
-    total_revenue = _sum_complete(rows, "revenue_total")
-    total_revenue_per_day = _sum_complete(rows, "revenue_per_day")
-    total_inst_delta = _sum_complete(rows, "installs_delta_24h")
-    total_conv_from = _sum_complete(rows, "conv_from")
-    total_conv_to = _sum_complete(rows, "conv_to")
-    total_conv = (
-        total_conv_to / total_conv_from * 100
-        if total_conv_from is not None
-        and total_conv_to is not None
-        and total_conv_from > 0
-        else None
-    )
-    has_missing_data = any(
-        value is None
-        for value in (
-            total_mrr,
-            total_mrr_delta,
-            total_arr,
-            total_arr_delta,
-            total_revenue,
-            total_revenue_per_day,
-            total_inst_delta,
-            total_conv_from,
-            total_conv_to,
-        )
-    )
-    for r in rows:
-        name = r.get("name", "App")
-        mrr_total = r.get("mrr_total")
-        mrr_delta = r.get("mrr_delta_24h")
-        inst_total = r.get("installs_total")
-        inst_delta = r.get("installs_delta_24h")
-        revenue_total = r.get("revenue_total")
-        revenue_per_day = r.get("revenue_per_day")
-        arr_total = r.get("arr_total")
-        arr_delta = r.get("arr_delta_24h")
-        conv_rate = r.get("conv_rate")
-        lines.append(f"<b>{_escape_html(name)}</b>")
+
+    for row in rows:
+        lines.append(f"<b>{_escape_html(str(row.get('name', 'App')))}</b>")
         lines.append(
-            f"💰 MRR (на дату): ${_fmt_num(mrr_total)} "
-            f"{_fmt_delta(mrr_delta, is_mrr=True)}"
+            f"💰 MRR (на дату): ${_fmt_num(row.get('mrr_total'))} "
+            f"{_fmt_delta(row.get('mrr_delta_24h') if row.get('mrr_total') is not None else None, is_mrr=True)}"
         )
         lines.append(
-            f"💵 Revenue (месяц): ${_fmt_num(revenue_total)} "
-            f"{_fmt_delta(revenue_per_day, is_mrr=True)}"
+            f"📈 ARR (на дату): ${_fmt_num(row.get('arr_total'))} "
+            f"{_fmt_delta(row.get('arr_delta_24h') if row.get('arr_total') is not None else None, is_mrr=True)}"
         )
         lines.append(
-            f"📲 Installs (месяц): {_fmt_num(inst_total)} {_fmt_delta(inst_delta)}"
+            f"💵 Revenue (месяц): ${_fmt_num(row.get('revenue_total'))} "
+            f"{_fmt_delta(row.get('revenue_per_day') if row.get('revenue_total') is not None else None, is_mrr=True)}"
         )
-        conv_str = f"{conv_rate:.2f}%" if conv_rate is not None else "N/A"
-        lines.append(f"🔄 Conv. Install→Paid (месяц): {conv_str}")
+        lines.append(
+            f"📲 Installs (месяц): {_fmt_num(row.get('installs_total'))} "
+            f"{_fmt_delta(row.get('installs_delta_24h') if row.get('installs_total') is not None else None)}"
+        )
+        conv_text = _fmt_conversion(
+            row.get("conv_rate"), row.get("conv_to"), row.get("conv_from")
+        )
+        lines.append(f"🔄 Conv. Install→Paid (месяц): {conv_text}")
         lines.append("")
-    lines.append("<b>Total</b>")
-    if has_missing_data:
-        lines.append("⚠️ <i>Некоторые данные недоступны, сумма может быть неполной</i>")
-    total_conv_str = f"{total_conv:.2f}%" if total_conv is not None else "N/A"
-    lines.append(
-        f"💰 Total MRR (на дату): ${_fmt_num(total_mrr)} "
-        f"{_fmt_delta(total_mrr_delta, is_mrr=True)}"
+
+    if total_conv_counts is None:
+        total_conv_text = "N/A"
+    else:
+        total_conv_text = _fmt_conversion(
+            total_conv, total_conv_counts[0], total_conv_counts[1]
+        )
+    lines.extend([
+        "<b>Total</b>",
+        (
+            f"💰 Total MRR (на дату): ${_fmt_num(total_mrr)} "
+            f"{_fmt_delta(total_mrr_delta if total_mrr is not None else None, is_mrr=True)}"
+        ),
+        (
+            f"📈 Total ARR (на дату): ${_fmt_num(total_arr)} "
+            f"{_fmt_delta(total_arr_delta if total_arr is not None else None, is_mrr=True)}"
+        ),
+        (
+            f"💵 Total Revenue (месяц): ${_fmt_num(total_revenue)} "
+            f"{_fmt_delta(total_revenue_per_day if total_revenue is not None else None, is_mrr=True)}"
+        ),
+        f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}",
+        f"🔄 Total Conv. (месяц): {total_conv_text}",
+        "",
+    ])
+    if problem_count:
+        lines.append(
+            f"⚠️ Проверка данных: обнаружено {problem_count} проблем — "
+            "недостоверные метрики показаны как N/A"
+        )
+    else:
+        lines.append("✅ Проверка данных: пройдена")
+
+    emit_integrity_audit(
+        report_date=resolved_report_date,
+        timezone=snapshot_tz,
+        rows=rows,
+        total_status={
+            "mrr_total": total_mrr is not None,
+            "mrr_delta_24h": total_mrr_delta is not None,
+            "arr_total": total_arr is not None,
+            "arr_delta_24h": total_arr_delta is not None,
+            "revenue_total": total_revenue is not None,
+            "revenue_per_day": total_revenue_per_day is not None,
+            "installs_delta_24h": total_inst_delta is not None,
+            "conversion": total_conv is not None,
+        },
+        portfolio_issues=snapshot.portfolio_issues,
     )
-    lines.append(
-        f"📈 Total ARR (на дату): ${_fmt_num(total_arr)} "
-        f"{_fmt_delta(total_arr_delta, is_mrr=True)}"
+
+    return ReportBuildResult(
+        text="\n".join(lines).strip(),
+        report_date=resolved_report_date,
+        anomalies=anomalies,
+        integrity_problem_count=problem_count,
     )
-    lines.append(
-        f"💵 Total Revenue (месяц): ${_fmt_num(total_revenue)} "
-        f"{_fmt_delta(total_revenue_per_day, is_mrr=True)}"
-    )
-    lines.append(f"📲 Total Downloads (за сутки): {_fmt_delta(total_inst_delta)}")
-    lines.append(f"🔄 Total Conv. (месяц): {total_conv_str}")
-    text = "\n".join(lines).strip()
-    return ReportBuildResult(text=text, report_date=resolved_report_date, anomalies=anomalies)
 
 
 def build_report_text(report_date: Union[date, datetime, None] = None) -> str:
-    """Совместимость со старым API: возвращает только текст отчёта."""
     return build_report(report_date=report_date).text

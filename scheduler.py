@@ -29,7 +29,7 @@ def _send_daily_job() -> None:
     logger.info("=" * 50)
     
     from report_builder import build_report
-    from telegram_sender import send_message
+    from telegram_sender import send_integrity_alert, send_message
     from config import get_telegram_admin_id
 
     try:
@@ -39,20 +39,13 @@ def _send_daily_job() -> None:
             from report_delivery import send_followup_reports
 
             send_followup_reports(report.report_date)
-            if report.anomalies:
+            if report.integrity_problem_count:
                 logger.warning(
-                    "Anomalies detected for report date %s: %s",
+                    "Integrity problems detected for report date %s: count=%s",
                     report.report_date,
-                    report.anomalies,
+                    report.integrity_problem_count,
                 )
-                admin_id = get_telegram_admin_id()
-                if admin_id:
-                    details = "\n".join(f"• {a}" for a in report.anomalies[:20])
-                    alert = (
-                        f"⚠️ Обнаружены аномалии в отчёте за {report.report_date.strftime('%d.%m.%Y')}\n\n"
-                        f"{details}"
-                    )
-                    send_message(alert, chat_id=admin_id)
+                send_integrity_alert(report)
         else:
             logger.error("Failed to send daily report")
     except Exception as e:
@@ -60,7 +53,7 @@ def _send_daily_job() -> None:
         # Отправляем аварийное уведомление администратору
         admin_id = get_telegram_admin_id()
         if admin_id:
-            error_message = f"🚨 Ошибка при отправке ежедневного отчета: {e}"
+            error_message = "🚨 Ошибка при формировании или отправке ежедневного отчёта. Проверьте журнал."
             try:
                 send_message(error_message, chat_id=admin_id)
             except Exception as send_err:

@@ -17,6 +17,7 @@
 - A portfolio total is numeric only when all three canonical application fields needed by that total are trusted.
 - Total conversion is `sum(value_to) / sum(value_from) * 100` and never an average of displayed percentages.
 - APP4+, visibility overrides, raw responses, API keys, authorization headers, Telegram tokens, and Railway secrets never enter calculations or logs.
+- Every canonical key is bound to its slot by a separately configured SHA-256 fingerprint; missing or mismatched fingerprints make the slot non-fetchable, and neither key nor fingerprint is logged.
 - A/B and Apple Ads metric definitions and delivery behavior remain unchanged.
 - Use `python -m unittest discover -s tests -v`; `pytest` is not a dependency.
 - Follow `superpowers:test-driven-development` for every behavior change and `superpowers:verification-before-completion` before merge or deployment.
@@ -185,7 +186,7 @@ def load_daily_portfolio(
 
 - [ ] **Step 4: Document the strict contract in `.env.example`**
 
-State that APP1–APP3 names are exact, visibility overrides are unsupported for the main report, and APP4+ is rejected as stale configuration. Do not add any key values.
+State that APP1–APP3 names are exact, each key requires a matching `ADAPTY_API_KEY_APP{N}_SHA256`, visibility overrides are unsupported for the main report, and APP4+ is rejected as stale configuration. Do not add any key or fingerprint values.
 
 - [ ] **Step 5: Run focused and existing config tests**
 
@@ -837,7 +838,7 @@ Require all commands to pass and a clean committed worktree.
 
 Ask exactly for permission to open Otty's Secret API key in Adapty and write it to Railway production. After approval, use the Adapty Copy control and a non-echoing stdin path such as `pbpaste | railway variable set ADAPTY_API_KEY_APP3 --stdin --skip-deploys`; never put the value in a command argument or output.
 
-Set the exact APP1–APP3 names, delete APP4 key/name and all visibility overrides, and preserve Telegram, A/B, Apple Ads, and schedule variables.
+Set the exact APP1–APP3 names and their locally computed SHA-256 fingerprints, delete APP4 key/name and all visibility overrides, and preserve Telegram, A/B, Apple Ads, and schedule variables. Fingerprints may be written as non-secret configuration, but must not be emitted together with their source keys.
 
 - [ ] **Step 4: Run no-send production previews**
 

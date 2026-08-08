@@ -87,8 +87,7 @@ def _collect_and_send(chat_id: str, to_group: bool = False) -> tuple[bool, str]:
     """
     try:
         from report_builder import build_report
-        from telegram_sender import send_message
-        from config import get_telegram_admin_id
+        from telegram_sender import send_integrity_alert, send_message
 
         report = build_report()
         text = report.text
@@ -98,30 +97,21 @@ def _collect_and_send(chat_id: str, to_group: bool = False) -> tuple[bool, str]:
             from report_delivery import send_followup_reports
 
             send_followup_reports(report.report_date)
-            has_anomalies = bool(report.anomalies)
-            sent_to_admin = False
-            if has_anomalies:
-                admin_id = get_telegram_admin_id()
-                if admin_id:
-                    details = "\n".join(f"• {a}" for a in report.anomalies[:20])
-                    alert = (
-                        f"⚠️ Обнаружены аномалии в отчёте за {report.report_date.strftime('%d.%m.%Y')}\n\n"
-                        f"{details}"
-                    )
-                    sent_to_admin = send_message(alert, chat_id=admin_id)
+            problem_count = report.integrity_problem_count
+            sent_to_admin = send_integrity_alert(report)
             if to_group:
                 msg = "✅ Отчёт отправлен в группу."
             else:
                 msg = "✅ Отчёт собран и отправлен."
-            if has_anomalies:
-                msg += " ⚠️ Есть аномалии в данных."
+            if problem_count:
+                msg += f" ⚠️ Проблем проверки данных: {problem_count}."
                 if sent_to_admin:
                     msg += " Подробности отправлены администратору."
             return True, msg
         return False, "❌ Не удалось отправить отчёт."
     except Exception as e:
         logger.exception("Collect and send failed: %s", e)
-        return False, f"❌ Ошибка: {e!s}"
+        return False, "❌ Ошибка при сборе отчёта. Подробности записаны в журнал."
 
 
 def _inline_keyboard() -> dict:

@@ -1,10 +1,18 @@
 """Regression tests for Adapty daily metric collection."""
 
 from datetime import date, datetime
+from decimal import Decimal
 import math
-from types import SimpleNamespace
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import call, Mock, patch
+
+from daily_metric_integrity import REPORT_VALUE_FIELDS
+from daily_report_contract import (
+    CANONICAL_APP_NAMES,
+    DailyAppSlot,
+    DailyPortfolio,
+    IntegrityIssue,
+)
 
 
 MRR_RESPONSE = {
@@ -56,6 +64,13 @@ CONVERSION_RESPONSE = {
 
 
 class TestChartMetricParsing(unittest.TestCase):
+    def test_rejects_non_mapping_top_level_payloads(self):
+        from adapty_client import _parse_chart_metric
+
+        for payload in ([], None, "invalid"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(_parse_chart_metric(payload, "mrr"))
+
     def test_parses_gross_mrr_summary_and_daily_values(self):
         from adapty_client import _parse_chart_metric
 
@@ -75,6 +90,45 @@ class TestChartMetricParsing(unittest.TestCase):
         self.assertEqual(metric.value, 1793.0)
         self.assertEqual(metric.daily_values, (300.0, 321.0))
         self.assertEqual(metric.daily_dates, ("2026-08-01", "2026-08-06"))
+
+    def test_preserves_integer_counts_above_float_precision(self):
+        from adapty_client import _parse_chart_metric, _parse_conversion_metric
+
+        huge = 9_007_199_254_740_993
+        installs = {
+            "data": {
+                "common": {
+                    "value": huge,
+                    "data": [{"values": [{"x": "2026-08-06", "y": huge}]}],
+                }
+            }
+        }
+        conversion = {
+            "metric_name": "install_paid",
+            "value": 0.0,
+            "value_from": huge,
+            "value_to": 0,
+        }
+
+        installs_metric = _parse_chart_metric(installs, "installs")
+        conversion_metric = _parse_conversion_metric(conversion)
+
+        self.assertEqual(installs_metric.value, huge)
+        self.assertEqual(installs_metric.daily_values, (huge,))
+        self.assertEqual(conversion_metric.value_from, huge)
+
+    def test_count_parser_never_rounds_large_numeric_strings(self):
+        from adapty_client import _parse_count
+
+        self.assertEqual(_parse_count("9007199254740993"), 9_007_199_254_740_993)
+        self.assertIsNone(_parse_count("9007199254740993.5"))
+        self.assertEqual(
+            _parse_count(Decimal("9007199254740993.0")),
+            9_007_199_254_740_993,
+        )
+        self.assertIsNone(_parse_count(Decimal("9007199254740993.5")))
+        self.assertIsNone(_parse_count(9_007_199_254_740_994.0))
+        self.assertIsNone(_parse_count(3.0))
 
     def test_does_not_fall_back_to_proceeds_for_gross_revenue_charts(self):
         from adapty_client import _parse_chart_metric
@@ -100,8 +154,82 @@ class TestChartMetricParsing(unittest.TestCase):
         self.assertIsNone(_parse_chart_metric(non_finite, "mrr"))
         self.assertIsNone(_parse_chart_metric(fractional_installs, "installs"))
 
+    def test_rejects_missing_empty_or_ambiguous_daily_series(self):
+        from adapty_client import _parse_chart_metric
+
+        missing = {"data": {"revenue": {"value": 10.0}}}
+        empty = {"data": {"revenue": {"value": 10.0, "data": []}}}
+        ambiguous = {
+            "data": {
+                "revenue": {
+                    "value": 10.0,
+                    "data": [
+                        {"values": [{"x": "2026-08-06", "y": 5.0}]},
+                        {"values": [{"x": "2026-08-06", "y": 5.0}]},
+                    ],
+                }
+            }
+        }
+
+        self.assertIsNone(_parse_chart_metric(missing, "revenue"))
+        self.assertIsNone(_parse_chart_metric(empty, "revenue"))
+        self.assertIsNone(_parse_chart_metric(ambiguous, "revenue"))
+
+    def test_rejects_negative_monetary_summary_or_source_point(self):
+        from adapty_client import _parse_chart_metric
+
+        negative_summary = {
+            "data": {
+                "revenue": {
+                    "value": -1.0,
+                    "data": [{"values": [{"x": "2026-08-06", "y": 1.0}]}],
+                }
+            }
+        }
+        negative_point = {
+            "data": {
+                "revenue": {
+                    "value": 1.0,
+                    "data": [{"values": [{"x": "2026-08-06", "y": -1.0}]}],
+                }
+            }
+        }
+
+        self.assertIsNone(_parse_chart_metric(negative_summary, "mrr"))
+        self.assertIsNone(_parse_chart_metric(negative_point, "mrr"))
+
+    def test_revenue_accepts_negative_refund_points_from_gross_series(self):
+        from adapty_client import _parse_chart_metric
+
+        payload = {
+            "data": {
+                "revenue": {
+                    "value": 16.0,
+                    "data": [{
+                        "values": [
+                            {"x": "2026-08-01", "y": 68.0},
+                            {"x": "2026-08-02", "y": -52.0},
+                        ]
+                    }],
+                }
+            }
+        }
+
+        metric = _parse_chart_metric(payload, "revenue")
+
+        self.assertIsNotNone(metric)
+        self.assertEqual(metric.value, 16.0)
+        self.assertEqual(metric.daily_values, (68.0, -52.0))
+
 
 class TestConversionMetricParsing(unittest.TestCase):
+    def test_rejects_non_mapping_top_level_payloads(self):
+        from adapty_client import _parse_conversion_metric
+
+        for payload in ([], None, "invalid"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(_parse_conversion_metric(payload))
+
     def test_preserves_percentage_and_raw_counts(self):
         from adapty_client import _parse_conversion_metric
 
@@ -281,7 +409,7 @@ class TestAppSnapshot(unittest.TestCase):
             report_date=datetime(2026, 8, 6),
         )
 
-        self.assertEqual(result["mrr_total"], 0.0)
+        self.assertIsNone(result["mrr_total"])
         self.assertIsNone(result["mrr_delta_24h"])
         self.assertIsNone(result["arr_total"])
         self.assertIsNone(result["arr_delta_24h"])
@@ -327,6 +455,109 @@ class TestAppSnapshot(unittest.TestCase):
 
 
 class TestRequestReliability(unittest.TestCase):
+    def test_fetches_quarantine_non_mapping_json_without_raising(self):
+        from adapty_client import _fetch_chart, _fetch_conversion
+
+        chart_response = Mock(status_code=200)
+        chart_response.raise_for_status.return_value = None
+        chart_response.json.return_value = []
+        conversion_response = Mock(status_code=200)
+        conversion_response.raise_for_status.return_value = None
+        conversion_response.json.return_value = None
+        session = Mock()
+        session.post.side_effect = [chart_response, conversion_response]
+
+        chart = _fetch_chart(
+            "sanitized-key",
+            "https://api-admin.adapty.io",
+            "analytics/",
+            "Europe/Minsk",
+            "mrr",
+            datetime(2026, 8, 5),
+            datetime(2026, 8, 6),
+            session=session,
+        )
+        conversion = _fetch_conversion(
+            "sanitized-key",
+            "https://api-admin.adapty.io",
+            "conversion/",
+            "Europe/Minsk",
+            datetime(2026, 8, 1),
+            datetime(2026, 8, 6),
+            session=session,
+        )
+
+        self.assertIsNone(chart)
+        self.assertIsNone(conversion)
+
+    @patch("adapty_client._fetch_conversion", return_value=None)
+    @patch("adapty_client.requests.post")
+    @patch("adapty_client.get_adapty_apps")
+    def test_debug_commands_never_print_raw_response_bodies(
+        self, mock_apps, mock_post, _mock_fetch_conversion
+    ):
+        from config import AppConfig
+        from adapty_client import _debug_adapty_response, _debug_conversion_response
+
+        mock_apps.return_value = [AppConfig("sanitized-key", "Safe App")]
+        response = Mock(status_code=200, ok=True, text="sensitive-raw-body")
+        response.json.return_value = {
+            "data": {"revenue": {"value": 123.0, "private": "sensitive-raw-body"}}
+        }
+        mock_post.return_value = response
+
+        with patch("builtins.print") as mock_print:
+            _debug_conversion_response()
+            _debug_adapty_response()
+
+        output = " ".join(str(call) for call in mock_print.call_args_list)
+        self.assertNotIn("sensitive-raw-body", output)
+        self.assertNotIn("sanitized-key", output)
+        self.assertIn("status", output.lower())
+    def test_fetch_logs_never_include_raw_response_bodies(self):
+        from adapty_client import _fetch_chart, _fetch_conversion
+
+        chart_response = Mock()
+        chart_response.status_code = 200
+        chart_response.text = "sensitive-chart-body"
+        chart_response.raise_for_status.return_value = None
+        chart_response.json.return_value = MRR_RESPONSE
+        conversion_response = Mock()
+        conversion_response.status_code = 200
+        conversion_response.text = "sensitive-conversion-body"
+        conversion_response.raise_for_status.return_value = None
+        conversion_response.json.return_value = CONVERSION_RESPONSE
+        session = Mock()
+        session.post.side_effect = [chart_response, conversion_response]
+
+        with self.assertLogs("adapty_client", level="DEBUG") as captured:
+            _fetch_chart(
+                "sanitized-key",
+                "https://api-admin.adapty.io",
+                "analytics/",
+                "Europe/Minsk",
+                "mrr",
+                datetime(2026, 8, 5),
+                datetime(2026, 8, 6),
+                session=session,
+            )
+            _fetch_conversion(
+                "sanitized-key",
+                "https://api-admin.adapty.io",
+                "conversion/",
+                "Europe/Minsk",
+                datetime(2026, 8, 1),
+                datetime(2026, 8, 6),
+                session=session,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("sensitive-chart-body", output)
+        self.assertNotIn("sensitive-conversion-body", output)
+        self.assertIn("chart_id=mrr", output)
+        chart_response.json.assert_called_once_with(parse_float=Decimal)
+        conversion_response.json.assert_called_once_with(parse_float=Decimal)
+
     def test_session_retries_rate_limits_and_server_errors(self):
         from adapty_client import _get_session
 
@@ -349,7 +580,7 @@ class TestRequestReliability(unittest.TestCase):
         self.assertEqual(started_at, 10.5)
 
 
-class TestFetchAllMetrics(unittest.TestCase):
+class TestFetchDailySnapshot(unittest.TestCase):
     @patch("adapty_client._fetch_app_snapshot")
     @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
     @patch(
@@ -360,10 +591,145 @@ class TestFetchAllMetrics(unittest.TestCase):
         "adapty_client.get_adapty_base_url",
         return_value="https://api-admin.adapty.io",
     )
-    @patch("adapty_client.get_adapty_apps")
-    def test_preserves_app_order_and_returns_complete_missing_row_on_failure(
+    @patch("adapty_client.load_daily_portfolio")
+    def test_preserves_canonical_order_and_quarantines_failed_fetch(
         self,
-        mock_get_apps,
+        mock_load_portfolio,
+        _mock_base_url,
+        _mock_analytics_path,
+        _mock_conversion_path,
+        _mock_timezone,
+        mock_snapshot,
+    ):
+        from adapty_client import fetch_daily_snapshot
+
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=tuple(
+                DailyAppSlot(index=i, name=name, api_key=f"key-{i + 1}")
+                for i, name in enumerate(CANONICAL_APP_NAMES)
+            ),
+            issues=(),
+        )
+
+        def snapshot_result(**kwargs):
+            if kwargs["app_index"] == 1:
+                raise RuntimeError("sanitized failure")
+            return {
+                "index": kwargs["app_index"],
+                "name": kwargs["app_name"],
+                "mrr_total": 100.0,
+                "mrr_delta_24h": 1.0,
+                "arr_total": 1200.0,
+                "arr_delta_24h": 12.0,
+                "revenue_total": 50.0,
+                "revenue_per_day": 5.0,
+                "installs_total": 100,
+                "installs_delta_24h": 10,
+                "conv_rate": 10.0,
+                "conv_from": 100,
+                "conv_to": 10,
+                "is_visible": kwargs["is_visible"],
+            }
+
+        mock_snapshot.side_effect = snapshot_result
+
+        snapshot = fetch_daily_snapshot(report_date=date(2026, 8, 6))
+        rows = snapshot.rows
+
+        self.assertEqual([row["name"] for row in rows], list(CANONICAL_APP_NAMES))
+        self.assertEqual(snapshot.portfolio_issues, ())
+        mrr_provenance = rows[0]["provenance"]["mrr_total"]
+        self.assertEqual(mrr_provenance.endpoint_class, "analytics")
+        self.assertEqual(mrr_provenance.metric_id, "mrr")
+        self.assertEqual(mrr_provenance.series_key, "data.revenue")
+        self.assertEqual(mrr_provenance.date_from, "2026-08-05")
+        self.assertEqual(mrr_provenance.date_to, "2026-08-06")
+        self.assertEqual(mrr_provenance.expected_date, "2026-08-06")
+        self.assertEqual(mrr_provenance.portfolio_version, "daily-v1")
+        self.assertEqual(mrr_provenance.request_status, "attempted")
+        failed = rows[1]
+        self.assertTrue(all(failed[field] is None for field in REPORT_VALUE_FIELDS))
+        self.assertIn("fetch.failed", {issue.code for issue in failed["issues"]})
+        self.assertEqual(
+            failed["provenance"]["mrr_total"].request_status,
+            "attempted",
+        )
+
+    @patch("adapty_client._fetch_app_snapshot")
+    @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
+    @patch("adapty_client.get_adapty_conversion_path", return_value="conversion/")
+    @patch("adapty_client.get_adapty_analytics_path", return_value="analytics/")
+    @patch("adapty_client.get_adapty_base_url", return_value="https://api-admin.adapty.io")
+    @patch("adapty_client.load_daily_portfolio")
+    def test_missing_key_returns_complete_na_row_without_submitting_it(
+        self,
+        mock_load_portfolio,
+        _mock_base_url,
+        _mock_analytics_path,
+        _mock_conversion_path,
+        _mock_timezone,
+        mock_snapshot,
+    ):
+        from adapty_client import fetch_daily_snapshot
+
+        missing = IntegrityIssue(
+            code="config.missing_key",
+            message="APP3 key missing",
+            app_name=CANONICAL_APP_NAMES[2],
+        )
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=(
+                DailyAppSlot(0, CANONICAL_APP_NAMES[0], "key-1"),
+                DailyAppSlot(1, CANONICAL_APP_NAMES[1], "key-2"),
+                DailyAppSlot(2, CANONICAL_APP_NAMES[2], None),
+            ),
+            issues=(missing,),
+        )
+        mock_snapshot.side_effect = lambda **kwargs: {
+            "index": kwargs["app_index"],
+            "name": kwargs["app_name"],
+            "mrr_total": 100.0,
+            "mrr_delta_24h": 1.0,
+            "arr_total": 1200.0,
+            "arr_delta_24h": 12.0,
+            "revenue_total": 50.0,
+            "revenue_per_day": 5.0,
+            "installs_total": 100,
+            "installs_delta_24h": 10,
+            "conv_rate": 10.0,
+            "conv_from": 100,
+            "conv_to": 10,
+            "is_visible": True,
+        }
+
+        snapshot = fetch_daily_snapshot(date(2026, 8, 6))
+
+        self.assertEqual(snapshot.rows[2]["name"], CANONICAL_APP_NAMES[2])
+        self.assertTrue(
+            all(snapshot.rows[2][field] is None for field in REPORT_VALUE_FIELDS)
+        )
+        self.assertIn(
+            "config.missing_key",
+            {issue.code for issue in snapshot.rows[2]["issues"]},
+        )
+        submitted_names = {
+            call.kwargs["app_name"] for call in mock_snapshot.call_args_list
+        }
+        self.assertNotIn(CANONICAL_APP_NAMES[2], submitted_names)
+        self.assertEqual(
+            snapshot.rows[2]["provenance"]["mrr_total"].request_status,
+            "not_requested",
+        )
+
+    @patch("adapty_client._fetch_app_snapshot")
+    @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
+    @patch("adapty_client.get_adapty_conversion_path", return_value="conversion/")
+    @patch("adapty_client.get_adapty_analytics_path", return_value="analytics/")
+    @patch("adapty_client.get_adapty_base_url", return_value="https://api-admin.adapty.io")
+    @patch("adapty_client.load_daily_portfolio")
+    def test_compatibility_wrapper_returns_snapshot_rows(
+        self,
+        mock_load_portfolio,
         _mock_base_url,
         _mock_analytics_path,
         _mock_conversion_path,
@@ -372,34 +738,18 @@ class TestFetchAllMetrics(unittest.TestCase):
     ):
         from adapty_client import fetch_all_metrics
 
-        mock_get_apps.return_value = [
-            SimpleNamespace(api_key="key-1", name="First", is_visible=True),
-            SimpleNamespace(api_key="key-2", name="Second", is_visible=True),
-            SimpleNamespace(api_key="key-3", name="Third", is_visible=True),
-        ]
+        mock_load_portfolio.return_value = DailyPortfolio(
+            slots=tuple(
+                DailyAppSlot(index=i, name=name, api_key=None)
+                for i, name in enumerate(CANONICAL_APP_NAMES)
+            ),
+            issues=(),
+        )
 
-        def snapshot_result(**kwargs):
-            if kwargs["app_index"] == 1:
-                raise RuntimeError("sanitized failure")
-            return {
-                "index": kwargs["app_index"],
-                "name": kwargs["app_name"],
-                "is_visible": kwargs["is_visible"],
-            }
+        rows = fetch_all_metrics(date(2026, 8, 6))
 
-        mock_snapshot.side_effect = snapshot_result
-
-        rows = fetch_all_metrics(report_date=date(2026, 8, 6))
-
-        self.assertEqual([row["name"] for row in rows], ["First", "Second", "Third"])
-        failed = rows[1]
-        self.assertIsNone(failed["mrr_total"])
-        self.assertIsNone(failed["arr_total"])
-        self.assertIsNone(failed["revenue_total"])
-        self.assertIsNone(failed["installs_total"])
-        self.assertIsNone(failed["conv_rate"])
-        self.assertIsNone(failed["conv_from"])
-        self.assertIsNone(failed["conv_to"])
+        self.assertEqual(tuple(row["name"] for row in rows), CANONICAL_APP_NAMES)
+        mock_snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

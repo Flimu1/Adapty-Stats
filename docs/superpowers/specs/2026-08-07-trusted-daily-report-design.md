@@ -60,7 +60,8 @@ the A/B and Apple Ads reports.
 
 For the daily report:
 
-- slots 1–3 must have exact names and non-empty Secret API keys;
+- slots 1–3 must have exact names, non-empty Secret API keys, and matching
+  per-slot SHA-256 fingerprints stored separately in configuration;
 - all three slots are visible;
 - `ADAPTY_APP_VISIBLE_*` does not control daily report scope;
 - APP4 and later slots are ignored and reported as stale configuration;
@@ -71,6 +72,11 @@ For the daily report:
 
 Secret key values are excluded from dataclass representations, logs, errors,
 tests, report text, and audit records.
+
+The fingerprint is an identity guard, not a credential: the loader computes
+SHA-256 locally and uses constant-time comparison. A missing or mismatched
+fingerprint blocks that slot before any Adapty request. Neither the key nor its
+fingerprint is included in messages, representations, or audit output.
 
 ## Metric Provenance
 
@@ -109,10 +115,10 @@ Telegram number.
   values are invalid.
 - Installs and conversion counts must be non-negative mathematical integers;
   fractional counts are invalid and are never truncated.
-- MRR, ARR, Revenue, and their current daily points must be finite and
-  non-negative.
-- MRR, ARR, and Revenue deltas may be negative because portfolio performance
-  can decline.
+- MRR and ARR current points must be finite and non-negative; their deltas may
+  be negative because portfolio performance can decline.
+- Revenue summary and daily points must be finite but may be negative because
+  Adapty's gross series includes refund and reversal adjustments.
 - Conversion percentage must be finite and within 0–100.
 - Zero is valid and remains distinct from missing data.
 
@@ -120,7 +126,8 @@ Telegram number.
 
 - Adapty timestamp labels are normalized to `YYYY-MM-DD`.
 - MRR and ARR require exact points for the previous calendar date and report
-  date; current value and delta are invalid if either expected date is absent.
+  date; current value and delta are atomically invalid if either expected date
+  is absent.
 - Revenue and Installs MTD summaries use a request from the first of the month
   through the report date.
 - Their parenthetical daily values require a final point whose normalized date
@@ -130,8 +137,8 @@ Telegram number.
 
 ### Within-Metric Reconciliation
 
-- Revenue MTD must be greater than or equal to the non-negative report-day
-  Revenue point.
+- Revenue MTD and report-day Revenue are trusted independently because refund
+  timing can make either aggregate negative or make the daily point exceed MTD.
 - Installs MTD must be greater than or equal to report-day Installs.
 - Conversion requires `value_to <= value_from`.
 - When `value_from > 0`, the returned conversion percentage must match
@@ -149,10 +156,13 @@ Telegram number.
 ### Portfolio Reconciliation
 
 - Each total is recomputed from the canonical application rows.
+- Monetary totals sum the cent-rounded values rendered for each application,
+  using decimal `ROUND_HALF_UP`, so the displayed total is arithmetically exact.
 - A total is numeric only when all three canonical application values required
   by that total are trusted.
 - Total conversion is `sum(value_to) / sum(value_from) * 100`; displayed
-  application percentages are never averaged.
+  application percentages are never averaged. Each application and total also
+  renders its raw `value_to/value_from` counts for direct reconciliation.
 - A zero summed conversion denominator produces `N/A`, not `0.00%`.
 - Every computed total is checked once more against the same displayed source
   values before formatting.
@@ -236,7 +246,8 @@ The complete existing suite must remain green.
 
 Before enabling the strict portfolio contract in production:
 
-1. securely replace APP3 with Otty's Secret API key and exact name;
+1. securely replace APP3 with Otty's Secret API key, matching SHA-256
+   fingerprint, and exact name;
 2. remove Calorie Tracker, TeaNote, APP4, and visibility overrides;
 3. run a no-send preview for 6 August and the current closed day;
 4. compare the three applications and totals with Adapty using the same
