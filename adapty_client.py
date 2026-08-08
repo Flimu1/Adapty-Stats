@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
@@ -77,10 +78,15 @@ def _parse_count(value: Any) -> Optional[int]:
     """Parse a non-negative mathematical integer without truncation."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value if value >= 0 else None
-    number = _parse_finite_number(value)
-    if number is None or number < 0 or not number.is_integer():
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if (
+        not number.is_finite()
+        or number < 0
+        or number != number.to_integral_value()
+    ):
         return None
     return int(number)
 
