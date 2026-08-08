@@ -1,6 +1,7 @@
 """Regression tests for Adapty daily metric collection."""
 
 from datetime import date, datetime
+from decimal import Decimal
 import math
 import unittest
 from unittest.mock import call, Mock, patch
@@ -121,6 +122,11 @@ class TestChartMetricParsing(unittest.TestCase):
 
         self.assertEqual(_parse_count("9007199254740993"), 9_007_199_254_740_993)
         self.assertIsNone(_parse_count("9007199254740993.5"))
+        self.assertEqual(
+            _parse_count(Decimal("9007199254740993.0")),
+            9_007_199_254_740_993,
+        )
+        self.assertIsNone(_parse_count(Decimal("9007199254740993.5")))
         self.assertIsNone(_parse_count(9_007_199_254_740_994.0))
         self.assertIsNone(_parse_count(3.0))
 
@@ -549,6 +555,8 @@ class TestRequestReliability(unittest.TestCase):
         self.assertNotIn("sensitive-chart-body", output)
         self.assertNotIn("sensitive-conversion-body", output)
         self.assertIn("chart_id=mrr", output)
+        chart_response.json.assert_called_once_with(parse_float=Decimal)
+        conversion_response.json.assert_called_once_with(parse_float=Decimal)
 
     def test_session_retries_rate_limits_and_server_errors(self):
         from adapty_client import _get_session

@@ -247,7 +247,7 @@ def _fetch_chart(
             period_unit,
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = resp.json(parse_float=Decimal)
     except requests.RequestException as e:
         logger.exception("Adapty API request failed (chart_id=%s): %s", chart_id, e)
         return None
@@ -307,7 +307,7 @@ def _fetch_conversion(
             body["filters"]["date"][1],
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = resp.json(parse_float=Decimal)
     except requests.RequestException as e:
         logger.exception("Adapty Conversion API request failed: %s", e)
         return None
