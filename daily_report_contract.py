@@ -33,6 +33,7 @@ class MetricProvenance:
     date_to: str
     expected_date: str
     portfolio_version: str = PORTFOLIO_VERSION
+    request_status: str = "attempted"
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,7 @@ def _fingerprint(value: str) -> str:
 
 class TestDailyPortfolioContract(unittest.TestCase):
     def test_daily_metrics_snapshot_preserves_rows_and_portfolio_issues(self):
-        from daily_report_contract import DailyMetricsSnapshot, IntegrityIssue
+        from daily_report_contract import DailyMetricsSnapshot, IntegrityIssue, MetricProvenance
 
         issue = IntegrityIssue(code="config.extra_slot", message="APP4 ignored")
         snapshot = DailyMetricsSnapshot(
@@ -18,6 +18,10 @@ class TestDailyPortfolioContract(unittest.TestCase):
 
         self.assertEqual(snapshot.rows[0]["name"], "App")
         self.assertEqual(snapshot.portfolio_issues, (issue,))
+        provenance = MetricProvenance(
+            "analytics", "mrr", "data.revenue", "2026-08-05", "2026-08-06", "2026-08-06"
+        )
+        self.assertEqual(provenance.request_status, "attempted")
 
     def test_loads_exact_three_canonical_slots_and_hides_keys_from_repr(self):
         from daily_report_contract import CANONICAL_APP_NAMES, load_daily_portfolio

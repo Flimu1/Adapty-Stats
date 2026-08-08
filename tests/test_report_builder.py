@@ -40,6 +40,7 @@ def valid_rows() -> list[dict]:
 def build_with_rows(
     rows: list[dict],
     portfolio_issues: tuple[IntegrityIssue, ...] = (),
+    report_date: date = date(2026, 8, 6),
 ):
     from report_builder import build_report
 
@@ -48,7 +49,7 @@ def build_with_rows(
         portfolio_issues=portfolio_issues,
     )
     with patch("report_builder.fetch_daily_snapshot", return_value=snapshot):
-        return build_report(date(2026, 8, 6))
+        return build_report(report_date)
 
 
 class TestReportBuilder(unittest.TestCase):
@@ -152,6 +153,32 @@ class TestReportBuilder(unittest.TestCase):
         self.assertIn("Total ARR (на дату): $0 (+$0)", text)
         self.assertIn("Total Revenue (месяц): $0 (+$0)", text)
 
+    def test_integer_totals_preserve_counts_above_float_precision(self):
+        rows = valid_rows()
+        denominators = [9_007_199_254_740_993, 9_007_199_254_740_995, 9_007_199_254_740_991]
+        download_deltas = [9_007_199_254_740_993, 3, 5]
+        for row, denominator, download_delta in zip(
+            rows, denominators, download_deltas
+        ):
+            row.update(
+                conv_from=denominator,
+                conv_to=1,
+                conv_rate=1 / denominator * 100,
+                installs_total=denominator,
+                installs_delta_24h=download_delta,
+            )
+
+        text = build_with_rows(rows).text
+
+        self.assertIn(
+            f"Total Conv. (месяц): 0.00% (3/{sum(denominators):,})",
+            text,
+        )
+        self.assertIn(
+            f"Total Downloads (за сутки): (+{sum(download_deltas):,})",
+            text,
+        )
+
     def test_august_six_backfill_uses_canonical_installs_snapshot(self):
         rows = valid_rows()
         rows[0].update(
@@ -170,6 +197,50 @@ class TestReportBuilder(unittest.TestCase):
         self.assertIn("📊 Отчёт на 06.08.2026", text)
         self.assertIn("Installs (месяц): 1,793 (+321)", text)
         self.assertNotIn("Installs (месяц): 1,784", text)
+
+    def test_august_four_to_six_backfill_snapshots_pass_validation_pipeline(self):
+        from daily_metric_integrity import validate_app_metrics
+
+        fixtures = {
+            date(2026, 8, 4): (
+                ((1183, 306, 11), (3, 2, 0), (612, 115, 0)),
+                1798,
+                423,
+                1178,
+            ),
+            date(2026, 8, 5): (
+                ((1472, 289, 11), (3, 0, 0), (742, 130, 0)),
+                2217,
+                419,
+                1466,
+            ),
+            date(2026, 8, 6): (
+                ((1793, 321, 15), (4, 1, 0), (1021, 279, 0)),
+                2818,
+                601,
+                1784,
+            ),
+        }
+
+        for report_date, (apps, total_installs, daily_downloads, stale_value) in fixtures.items():
+            with self.subTest(report_date=report_date):
+                rows = valid_rows()
+                for row, (installs, daily, paid) in zip(rows, apps):
+                    row.update(
+                        installs_total=installs,
+                        installs_delta_24h=daily,
+                        conv_from=installs,
+                        conv_to=paid,
+                        conv_rate=paid / installs * 100,
+                    )
+                validated = [validate_app_metrics(row) for row in rows]
+
+                self.assertTrue(all(not row["issues"] for row in validated))
+                text = build_with_rows(validated, report_date=report_date).text
+                self.assertIn(f"({sum(app[2] for app in apps)}/{total_installs:,})", text)
+                self.assertIn(f"Total Downloads (за сутки): (+{daily_downloads})", text)
+                self.assertNotIn(f"Installs (месяц): {stale_value:,}", text)
+                self.assertIn("✅ Проверка данных: пройдена", text)
 
     def test_portfolio_only_issue_preserves_values_but_warns(self):
         issue = IntegrityIssue(code="config.extra_slot", message="APP4 ignored")

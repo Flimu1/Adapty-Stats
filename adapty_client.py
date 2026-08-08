@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 class ChartMetric:
     """Summary and daily series returned by one Adapty analytics chart."""
 
-    value: float
-    daily_values: tuple[float, ...]
+    value: Union[int, float]
+    daily_values: tuple[Union[int, float], ...]
     daily_dates: tuple[str, ...]
 
 
@@ -75,6 +75,10 @@ def _parse_finite_number(value: Any) -> Optional[float]:
 
 def _parse_count(value: Any) -> Optional[int]:
     """Parse a non-negative mathematical integer without truncation."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
     number = _parse_finite_number(value)
     if number is None or number < 0 or not number.is_integer():
         return None
@@ -92,9 +96,11 @@ def _parse_point_date(value: Any) -> Optional[str]:
 
 
 def _parse_chart_metric(
-    payload: dict[str, Any], chart_id: str
+    payload: Any, chart_id: str
 ) -> Optional[ChartMetric]:
     """Parse the summary and daily points without falling back to net proceeds."""
+    if not isinstance(payload, dict):
+        return None
     data = payload.get("data")
     if not isinstance(data, dict):
         return None
@@ -107,14 +113,14 @@ def _parse_chart_metric(
         count_value = _parse_count(metric["value"])
         if count_value is None:
             return None
-        value = float(count_value)
+        value = count_value
     else:
         parsed_value = _parse_finite_number(metric["value"])
         if parsed_value is None or (chart_id != "revenue" and parsed_value < 0):
             return None
         value = parsed_value
 
-    daily_values: list[float] = []
+    daily_values: list[Union[int, float]] = []
     daily_dates: list[str] = []
     series = metric.get("data")
     if not isinstance(series, list) or len(series) != 1:
@@ -135,7 +141,7 @@ def _parse_chart_metric(
             point_count = _parse_count(point.get("y"))
             if point_count is None:
                 return None
-            point_value = float(point_count)
+            point_value = point_count
         else:
             parsed_point = _parse_finite_number(point.get("y"))
             if parsed_point is None or (chart_id != "revenue" and parsed_point < 0):
@@ -150,8 +156,10 @@ def _parse_chart_metric(
     )
 
 
-def _parse_conversion_metric(payload: dict[str, Any]) -> Optional[ConversionMetric]:
+def _parse_conversion_metric(payload: Any) -> Optional[ConversionMetric]:
     """Parse Adapty's percentage and the raw counts used to calculate it."""
+    if not isinstance(payload, dict):
+        return None
     if payload.get("metric_name") != "install_paid":
         return None
     value = _parse_finite_number(payload.get("value"))
@@ -240,10 +248,11 @@ def _fetch_chart(
 
     metric = _parse_chart_metric(data, chart_id)
     if metric is None:
-        data_obj = data.get("data")
+        data_obj = data.get("data") if isinstance(data, dict) else None
         logger.warning(
-            "Adapty API: gross metric not found for chart_id=%s, data keys=%s",
+            "Adapty API: unsupported metric payload chart_id=%s payload_type=%s data_keys=%s",
             chart_id,
+            type(data).__name__,
             list(data_obj.keys()) if isinstance(data_obj, dict) else [],
         )
     return metric
@@ -306,10 +315,9 @@ def _fetch_conversion(
 def _debug_conversion_response() -> None:
     """
     Запрос Conversion API (Install→Paid) для первого приложения.
-    Выводит сырой ответ для сверки с дашбордом Adapty.
+    Выводит только безопасную структуру ответа для сверки с дашбордом Adapty.
     Запуск: python main.py --debug-conversion
     """
-    import json
     apps = get_adapty_apps()
     base_url = get_adapty_base_url()
     path = get_adapty_conversion_path()
@@ -350,23 +358,21 @@ def _debug_conversion_response() -> None:
     }
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=30)
-        print("Raw response status:", resp.status_code)
-        print("Raw response body:")
-        if resp.text:
-            try:
-                j = resp.json()
-                print(json.dumps(j, indent=2, ensure_ascii=False))
-            except Exception:
-                print(resp.text[:2000])
+        print("Response status:", resp.status_code)
+        try:
+            payload = resp.json()
+        except ValueError:
+            print("Payload type: invalid-json")
         else:
-            print("(empty)")
-    except Exception as e:
-        print("Request failed:", e)
+            print("Payload type:", type(payload).__name__)
+            print("Top-level keys:", sorted(payload) if isinstance(payload, dict) else [])
+    except requests.RequestException as error:
+        print("Request failed:", type(error).__name__)
 
 
 def _debug_adapty_response() -> None:
     """
-    Выполняет один запрос к Adapty (MRR для первого приложения) и выводит сырой ответ.
+    Выполняет запросы к Adapty и выводит только безопасную структуру ответа.
     Запуск: python main.py --debug-adapty (или LOG_LEVEL=DEBUG python main.py --test-send).
     Даты запроса — в timezone отчёта (по умолчанию Europe/Minsk, GMT+3).
     """
@@ -403,29 +409,19 @@ def _debug_adapty_response() -> None:
         try:
             resp = requests.post(url, json=body_chart, headers=headers, timeout=30)
             print("Status:", resp.status_code)
-            # Показываем только ключи верхнего уровня и data.*
-            if resp.ok and resp.text:
-                try:
-                    j = resp.json()
-                    d = j.get("data") or {}
-                    keys = list(d.keys()) if isinstance(d, dict) else []
-                    print("data keys:", keys)
-                    for k in keys[:3]:  # первые 3 ключа и их value
-                        v = d.get(k)
-                        if isinstance(v, dict):
-                            print(f"  {k}.value =", v.get("value"))
-                        else:
-                            print(f"  {k} =", type(v).__name__)
-                    if len(resp.text) < 1500:
-                        print("Response:", resp.text[:1500])
-                    else:
-                        print("Response (first 800 chars):", resp.text[:800], "...")
-                except Exception:
-                    print("Response (raw):", resp.text[:1500])
+            try:
+                payload = resp.json()
+            except ValueError:
+                print("Payload type: invalid-json")
             else:
-                print("Response:", resp.text[:500] if resp.text else "(empty)")
-        except Exception as e:
-            print("Request failed:", e)
+                data_obj = payload.get("data") if isinstance(payload, dict) else None
+                print("Payload type:", type(payload).__name__)
+                print(
+                    "data keys:",
+                    sorted(data_obj) if isinstance(data_obj, dict) else [],
+                )
+        except requests.RequestException as error:
+            print("Request failed:", type(error).__name__)
         print()
 
 
@@ -455,10 +451,10 @@ def _last_value(
     return metric.daily_values[-1]
 
 
-def _last_delta(
+def _exact_current_and_delta(
     metric: Optional[ChartMetric], previous_date: datetime, report_date: datetime
-) -> Optional[float]:
-    """Return a delta only for the two exact requested calendar dates."""
+) -> tuple[Optional[float], Optional[float]]:
+    """Return current and delta only for the exact requested date pair."""
     expected_dates = (
         previous_date.strftime("%Y-%m-%d"),
         report_date.strftime("%Y-%m-%d"),
@@ -469,8 +465,9 @@ def _last_delta(
         or len(metric.daily_dates) < 2
         or metric.daily_dates[-2:] != expected_dates
     ):
-        return None
-    return metric.daily_values[-1] - metric.daily_values[-2]
+        return None, None
+    current = metric.daily_values[-1]
+    return current, current - metric.daily_values[-2]
 
 
 def _fetch_app_snapshot(
@@ -546,19 +543,25 @@ def _fetch_app_snapshot(
 
     installs_total = int(installs.value) if installs is not None else None
     installs_today = _last_value(installs, report_date)
+    mrr_total, mrr_delta = _exact_current_and_delta(
+        mrr, previous_date, report_date
+    )
+    arr_total, arr_delta = _exact_current_and_delta(
+        arr, previous_date, report_date
+    )
     return {
         "index": app_index,
         "name": app_name,
-        "mrr_total": _last_value(mrr, report_date),
-        "mrr_delta_24h": _last_delta(mrr, previous_date, report_date),
+        "mrr_total": mrr_total,
+        "mrr_delta_24h": mrr_delta,
         "installs_total": installs_total,
         "installs_delta_24h": (
             int(installs_today) if installs_today is not None else None
         ),
         "revenue_total": revenue.value if revenue is not None else None,
         "revenue_per_day": _last_value(revenue, report_date),
-        "arr_total": _last_value(arr, report_date),
-        "arr_delta_24h": _last_delta(arr, previous_date, report_date),
+        "arr_total": arr_total,
+        "arr_delta_24h": arr_delta,
         "conv_rate": conversion.value if conversion is not None else None,
         "conv_from": conversion.value_from if conversion is not None else None,
         "conv_to": conversion.value_to if conversion is not None else None,
@@ -569,6 +572,8 @@ def _fetch_app_snapshot(
 def _missing_app_row(
     slot: DailyAppSlot,
     issues: Sequence[IntegrityIssue],
+    *,
+    request_status: str = "not_requested",
 ) -> dict[str, Any]:
     relevant_issues = tuple(
         issue
@@ -581,6 +586,7 @@ def _missing_app_row(
         **{field: None for field in REPORT_VALUE_FIELDS},
         "issues": relevant_issues,
         "is_visible": True,
+        "_request_status": request_status,
     }
 
 
@@ -588,6 +594,7 @@ def _metric_provenance(
     month_start: datetime,
     previous_date: datetime,
     report_date: datetime,
+    request_status: str = "attempted",
 ) -> dict[str, MetricProvenance]:
     expected = report_date.date().isoformat()
     previous = previous_date.date().isoformat()
@@ -605,6 +612,7 @@ def _metric_provenance(
             date_from=date_from,
             date_to=expected,
             expected_date=expected,
+            request_status=request_status,
         )
 
     mrr = analytics("mrr", "data.revenue", previous)
@@ -618,6 +626,7 @@ def _metric_provenance(
         date_from=month,
         date_to=expected,
         expected_date=expected,
+        request_status=request_status,
     )
     return {
         "mrr_total": mrr,
@@ -719,13 +728,22 @@ def fetch_daily_snapshot(
                         message=f"{slot.name}: metric collection failed",
                         app_name=slot.name,
                     )
-                    row = _missing_app_row(slot, (fetch_issue,))
+                    row = _missing_app_row(
+                        slot,
+                        (fetch_issue,),
+                        request_status="attempted",
+                    )
                 results.append(validate_app_metrics(row))
 
     results.sort(key=lambda r: r["index"])
-    provenance = _metric_provenance(date_start_month, date_prev, date_target)
     for row in results:
-        row["provenance"] = provenance
+        request_status = row.pop("_request_status", "attempted")
+        row["provenance"] = _metric_provenance(
+            date_start_month,
+            date_prev,
+            date_target,
+            request_status=request_status,
+        )
     return DailyMetricsSnapshot(
         rows=tuple(results),
         portfolio_issues=portfolio.issues,

@@ -182,10 +182,40 @@ class TestDailyMetricAudit(unittest.TestCase):
             app_name="Granny Photos",
             metric="revenue_total",
         )
-        rows = ({"issues": (issue, issue)},)
+        row = valid_row()
+        row.update(revenue_total=None, issues=(issue, issue))
+        rows = (row,)
         portfolio_issue = IntegrityIssue(code="config.extra_slot", message="ignored")
 
         self.assertEqual(count_integrity_problems(rows, (portfolio_issue,)), 2)
+
+    def test_problem_count_groups_quarantined_fields_into_metric_families(self):
+        from daily_metric_integrity import count_integrity_problems
+
+        row = valid_row()
+        row.update(
+            mrr_total=None,
+            mrr_delta_24h=None,
+            issues=(
+                IntegrityIssue("mrr.total_invalid", "invalid", row["name"], "mrr_total"),
+                IntegrityIssue("mrr.delta_invalid", "invalid", row["name"], "mrr_delta_24h"),
+            ),
+        )
+
+        self.assertEqual(count_integrity_problems((row,), ()), 1)
+
+    def test_problem_count_registers_all_families_for_blocked_slot(self):
+        from daily_metric_integrity import REPORT_VALUE_FIELDS, count_integrity_problems
+
+        row = {
+            **valid_row(),
+            **{field: None for field in REPORT_VALUE_FIELDS},
+            "issues": (IntegrityIssue(
+                "fetch.failed", "collection failed", "Unfollowers: Follow & Unfollow"
+            ),),
+        }
+
+        self.assertEqual(count_integrity_problems((row,), ()), 5)
 
     def test_audit_logs_status_without_values_or_secrets(self):
         from daily_metric_integrity import emit_integrity_audit, validate_app_metrics
@@ -209,7 +239,11 @@ class TestDailyMetricAudit(unittest.TestCase):
                 report_date=date(2026, 8, 6),
                 timezone="Europe/Minsk",
                 rows=(validated,),
-                total_status={"mrr_total": True, "revenue_total": False},
+                total_status={
+                    "mrr_total": True,
+                    "revenue_total": False,
+                    "conversion": False,
+                },
                 portfolio_issues=(),
             )
 
@@ -222,7 +256,13 @@ class TestDailyMetricAudit(unittest.TestCase):
         self.assertIn("source=mrr:data.revenue", output)
         self.assertIn("date_from=2026-08-05 date_to=2026-08-06", output)
         self.assertIn("expected_date=2026-08-06 portfolio=daily-v1", output)
+        self.assertIn("request_status=attempted", output)
         self.assertIn("total_metric=revenue_total status=invalid", output)
+        self.assertIn(
+            "total_metric=conversion status=invalid endpoint=derived "
+            "source=canonical_raw_count_ratio",
+            output,
+        )
         self.assertNotIn("sanitized-secret-key", output)
         self.assertNotIn("api_key", output)
 

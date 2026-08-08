@@ -63,6 +63,13 @@ CONVERSION_RESPONSE = {
 
 
 class TestChartMetricParsing(unittest.TestCase):
+    def test_rejects_non_mapping_top_level_payloads(self):
+        from adapty_client import _parse_chart_metric
+
+        for payload in ([], None, "invalid"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(_parse_chart_metric(payload, "mrr"))
+
     def test_parses_gross_mrr_summary_and_daily_values(self):
         from adapty_client import _parse_chart_metric
 
@@ -82,6 +89,32 @@ class TestChartMetricParsing(unittest.TestCase):
         self.assertEqual(metric.value, 1793.0)
         self.assertEqual(metric.daily_values, (300.0, 321.0))
         self.assertEqual(metric.daily_dates, ("2026-08-01", "2026-08-06"))
+
+    def test_preserves_integer_counts_above_float_precision(self):
+        from adapty_client import _parse_chart_metric, _parse_conversion_metric
+
+        huge = 9_007_199_254_740_993
+        installs = {
+            "data": {
+                "common": {
+                    "value": huge,
+                    "data": [{"values": [{"x": "2026-08-06", "y": huge}]}],
+                }
+            }
+        }
+        conversion = {
+            "metric_name": "install_paid",
+            "value": 0.0,
+            "value_from": huge,
+            "value_to": 0,
+        }
+
+        installs_metric = _parse_chart_metric(installs, "installs")
+        conversion_metric = _parse_conversion_metric(conversion)
+
+        self.assertEqual(installs_metric.value, huge)
+        self.assertEqual(installs_metric.daily_values, (huge,))
+        self.assertEqual(conversion_metric.value_from, huge)
 
     def test_does_not_fall_back_to_proceeds_for_gross_revenue_charts(self):
         from adapty_client import _parse_chart_metric
@@ -176,6 +209,13 @@ class TestChartMetricParsing(unittest.TestCase):
 
 
 class TestConversionMetricParsing(unittest.TestCase):
+    def test_rejects_non_mapping_top_level_payloads(self):
+        from adapty_client import _parse_conversion_metric
+
+        for payload in ([], None, "invalid"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(_parse_conversion_metric(payload))
+
     def test_preserves_percentage_and_raw_counts(self):
         from adapty_client import _parse_conversion_metric
 
@@ -355,7 +395,7 @@ class TestAppSnapshot(unittest.TestCase):
             report_date=datetime(2026, 8, 6),
         )
 
-        self.assertEqual(result["mrr_total"], 0.0)
+        self.assertIsNone(result["mrr_total"])
         self.assertIsNone(result["mrr_delta_24h"])
         self.assertIsNone(result["arr_total"])
         self.assertIsNone(result["arr_delta_24h"])
@@ -401,6 +441,65 @@ class TestAppSnapshot(unittest.TestCase):
 
 
 class TestRequestReliability(unittest.TestCase):
+    def test_fetches_quarantine_non_mapping_json_without_raising(self):
+        from adapty_client import _fetch_chart, _fetch_conversion
+
+        chart_response = Mock(status_code=200)
+        chart_response.raise_for_status.return_value = None
+        chart_response.json.return_value = []
+        conversion_response = Mock(status_code=200)
+        conversion_response.raise_for_status.return_value = None
+        conversion_response.json.return_value = None
+        session = Mock()
+        session.post.side_effect = [chart_response, conversion_response]
+
+        chart = _fetch_chart(
+            "sanitized-key",
+            "https://api-admin.adapty.io",
+            "analytics/",
+            "Europe/Minsk",
+            "mrr",
+            datetime(2026, 8, 5),
+            datetime(2026, 8, 6),
+            session=session,
+        )
+        conversion = _fetch_conversion(
+            "sanitized-key",
+            "https://api-admin.adapty.io",
+            "conversion/",
+            "Europe/Minsk",
+            datetime(2026, 8, 1),
+            datetime(2026, 8, 6),
+            session=session,
+        )
+
+        self.assertIsNone(chart)
+        self.assertIsNone(conversion)
+
+    @patch("adapty_client._fetch_conversion", return_value=None)
+    @patch("adapty_client.requests.post")
+    @patch("adapty_client.get_adapty_apps")
+    def test_debug_commands_never_print_raw_response_bodies(
+        self, mock_apps, mock_post, _mock_fetch_conversion
+    ):
+        from config import AppConfig
+        from adapty_client import _debug_adapty_response, _debug_conversion_response
+
+        mock_apps.return_value = [AppConfig("sanitized-key", "Safe App")]
+        response = Mock(status_code=200, ok=True, text="sensitive-raw-body")
+        response.json.return_value = {
+            "data": {"revenue": {"value": 123.0, "private": "sensitive-raw-body"}}
+        }
+        mock_post.return_value = response
+
+        with patch("builtins.print") as mock_print:
+            _debug_conversion_response()
+            _debug_adapty_response()
+
+        output = " ".join(str(call) for call in mock_print.call_args_list)
+        self.assertNotIn("sensitive-raw-body", output)
+        self.assertNotIn("sanitized-key", output)
+        self.assertIn("status", output.lower())
     def test_fetch_logs_never_include_raw_response_bodies(self):
         from adapty_client import _fetch_chart, _fetch_conversion
 
@@ -531,9 +630,14 @@ class TestFetchDailySnapshot(unittest.TestCase):
         self.assertEqual(mrr_provenance.date_to, "2026-08-06")
         self.assertEqual(mrr_provenance.expected_date, "2026-08-06")
         self.assertEqual(mrr_provenance.portfolio_version, "daily-v1")
+        self.assertEqual(mrr_provenance.request_status, "attempted")
         failed = rows[1]
         self.assertTrue(all(failed[field] is None for field in REPORT_VALUE_FIELDS))
         self.assertIn("fetch.failed", {issue.code for issue in failed["issues"]})
+        self.assertEqual(
+            failed["provenance"]["mrr_total"].request_status,
+            "attempted",
+        )
 
     @patch("adapty_client._fetch_app_snapshot")
     @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")
@@ -596,6 +700,10 @@ class TestFetchDailySnapshot(unittest.TestCase):
             call.kwargs["app_name"] for call in mock_snapshot.call_args_list
         }
         self.assertNotIn(CANONICAL_APP_NAMES[2], submitted_names)
+        self.assertEqual(
+            snapshot.rows[2]["provenance"]["mrr_total"].request_status,
+            "not_requested",
+        )
 
     @patch("adapty_client._fetch_app_snapshot")
     @patch("adapty_client.get_adapty_timezone", return_value="Europe/Minsk")

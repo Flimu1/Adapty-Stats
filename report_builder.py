@@ -52,11 +52,11 @@ def _fmt_delta(delta: Union[float, int, None], is_mrr: bool = False) -> str:
     return f"({prefix}{_fmt_num(int(delta))})"
 
 
-def _sum_complete(rows: Sequence[dict], key: str) -> Optional[float]:
+def _sum_complete_int(rows: Sequence[dict], key: str) -> Optional[int]:
     values = [row.get(key) for row in rows]
     if not values or any(value is None for value in values):
         return None
-    return sum(float(value) for value in values)
+    return sum(int(value) for value in values)
 
 
 def _sum_displayed_money(rows: Sequence[dict], key: str) -> Optional[Decimal]:
@@ -101,8 +101,8 @@ def _issue_details(
 
 
 def _total_conversion(rows: Sequence[dict]) -> Optional[float]:
-    total_from = _sum_complete(rows, "conv_from")
-    total_to = _sum_complete(rows, "conv_to")
+    total_from = _sum_complete_int(rows, "conv_from")
+    total_to = _sum_complete_int(rows, "conv_to")
     if total_from is None or total_to is None:
         return None
     if total_from == 0:
@@ -111,8 +111,8 @@ def _total_conversion(rows: Sequence[dict]) -> Optional[float]:
 
 
 def _conversion_counts(rows: Sequence[dict]) -> Optional[tuple[int, int]]:
-    total_from = _sum_complete(rows, "conv_from")
-    total_to = _sum_complete(rows, "conv_to")
+    total_from = _sum_complete_int(rows, "conv_from")
+    total_to = _sum_complete_int(rows, "conv_to")
     if total_from is None or total_to is None:
         return None
     return int(total_to), int(total_from)
@@ -152,7 +152,7 @@ def build_report(report_date: Union[date, datetime, None] = None) -> ReportBuild
     total_arr_delta = _sum_displayed_money(rows, "arr_delta_24h")
     total_revenue = _sum_displayed_money(rows, "revenue_total")
     total_revenue_per_day = _sum_displayed_money(rows, "revenue_per_day")
-    total_inst_delta = _sum_complete(rows, "installs_delta_24h")
+    total_inst_delta = _sum_complete_int(rows, "installs_delta_24h")
     total_conv = _total_conversion(rows)
     total_conv_counts = _conversion_counts(rows)
 

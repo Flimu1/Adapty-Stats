@@ -126,7 +126,8 @@ Telegram number.
 
 - Adapty timestamp labels are normalized to `YYYY-MM-DD`.
 - MRR and ARR require exact points for the previous calendar date and report
-  date; current value and delta are invalid if either expected date is absent.
+  date; current value and delta are atomically invalid if either expected date
+  is absent.
 - Revenue and Installs MTD summaries use a request from the first of the month
   through the report date.
 - Their parenthetical daily values require a final point whose normalized date

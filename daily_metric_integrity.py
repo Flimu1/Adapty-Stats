@@ -214,16 +214,28 @@ def count_integrity_problems(
     rows: Sequence[dict[str, Any]],
     portfolio_issues: Sequence[IntegrityIssue],
 ) -> int:
-    identities = {
-        (issue.code, issue.app_name, issue.metric)
-        for issue in portfolio_issues
+    families = {
+        "mrr": ("mrr_total", "mrr_delta_24h"),
+        "arr": ("arr_total", "arr_delta_24h"),
+        "revenue": ("revenue_total", "revenue_per_day"),
+        "installs": ("installs_total", "installs_delta_24h"),
+        "conversion": ("conv_rate", "conv_from", "conv_to"),
     }
-    for row in rows:
-        identities.update(
-            (issue.code, issue.app_name, issue.metric)
-            for issue in row.get("issues", ())
+    quarantined_families = {
+        (str(row.get("name", "Unknown app")), family)
+        for row in rows
+        for family, fields in families.items()
+        if any(row.get(field) is None for field in fields)
+    }
+    configuration_issues = {
+        (issue.code, issue.app_name, issue.metric)
+        for issue in (
+            *portfolio_issues,
+            *(issue for row in rows for issue in row.get("issues", ())),
         )
-    return len(identities)
+        if issue.code.startswith("config.") and issue.metric is None
+    }
+    return len(quarantined_families) + len(configuration_issues)
 
 
 def emit_integrity_audit(
@@ -265,8 +277,9 @@ def emit_integrity_audit(
                 "portfolio_version",
                 PORTFOLIO_VERSION,
             )
+            request_status = getattr(provenance, "request_status", "unknown")
             logger.info(
-                "daily_metric_audit report_date=%s timezone=%s slot=%s app=%s metric=%s status=%s issue=%s endpoint=%s source=%s:%s date_from=%s date_to=%s expected_date=%s portfolio=%s",
+                "daily_metric_audit report_date=%s timezone=%s slot=%s app=%s metric=%s status=%s issue=%s endpoint=%s source=%s:%s date_from=%s date_to=%s expected_date=%s portfolio=%s request_status=%s",
                 report_date.isoformat(),
                 timezone,
                 int(row["index"]) + 1,
@@ -281,15 +294,22 @@ def emit_integrity_audit(
                 date_to,
                 expected_date,
                 portfolio_version,
+                request_status,
             )
 
     for metric, is_valid in total_status.items():
+        source = (
+            "canonical_raw_count_ratio"
+            if metric == "conversion"
+            else "canonical_sum"
+        )
         logger.info(
-            "daily_total_audit report_date=%s timezone=%s total_metric=%s status=%s endpoint=derived source=canonical_sum expected_date=%s portfolio=%s",
+            "daily_total_audit report_date=%s timezone=%s total_metric=%s status=%s endpoint=derived source=%s expected_date=%s portfolio=%s",
             report_date.isoformat(),
             timezone,
             metric,
             "valid" if is_valid else "invalid",
+            source,
             report_date.isoformat(),
             PORTFOLIO_VERSION,
         )
