@@ -16,6 +16,7 @@ MONETARY_FIELDS = (
     "revenue_total",
     "revenue_per_day",
 )
+NONNEGATIVE_MONETARY_FIELDS = ("mrr_total", "arr_total")
 DELTA_FIELDS = ("mrr_delta_24h", "arr_delta_24h")
 COUNT_FIELDS = (
     "installs_total",
@@ -93,11 +94,18 @@ def validate_app_metrics(row: dict[str, Any]) -> dict[str, Any]:
 
     for field in MONETARY_FIELDS:
         parsed = _finite_number(result.get(field))
-        if parsed is None or parsed < 0:
+        if parsed is None or (
+            field in NONNEGATIVE_MONETARY_FIELDS and parsed < 0
+        ):
             _quarantine(
                 result,
                 (field,),
-                _issue(row, f"{field}.invalid_value", field, f"{field} is not a finite non-negative number"),
+                _issue(
+                    row,
+                    f"{field}.invalid_value",
+                    field,
+                    f"{field} is not a valid finite monetary value",
+                ),
             )
 
     for field in DELTA_FIELDS:
@@ -126,20 +134,6 @@ def validate_app_metrics(row: dict[str, Any]) -> dict[str, Any]:
                 "conversion.invalid_rate",
                 "conversion",
                 "conversion rate is not a finite percentage between 0 and 100",
-            ),
-        )
-
-    revenue_total = result.get("revenue_total")
-    revenue_day = result.get("revenue_per_day")
-    if revenue_total is not None and revenue_day is not None and revenue_day > revenue_total:
-        _quarantine(
-            result,
-            ("revenue_total", "revenue_per_day"),
-            _issue(
-                row,
-                "revenue.day_exceeds_mtd",
-                "revenue",
-                "report-day Revenue exceeds month-to-date Revenue",
             ),
         )
 

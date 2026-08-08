@@ -26,18 +26,17 @@ def valid_row() -> dict:
 
 
 class TestDailyMetricValidation(unittest.TestCase):
-    def test_revenue_inconsistency_quarantines_only_revenue_family(self):
+    def test_revenue_refunds_remain_valid_source_values(self):
         from daily_metric_integrity import validate_app_metrics
 
         row = valid_row()
-        row["revenue_total"] = 10.0
-        row["revenue_per_day"] = 11.0
+        row["revenue_total"] = -10.0
+        row["revenue_per_day"] = -11.0
         result = validate_app_metrics(row)
 
-        self.assertIsNone(result["revenue_total"])
-        self.assertIsNone(result["revenue_per_day"])
-        self.assertEqual(result["mrr_total"], row["mrr_total"])
-        self.assertIn("revenue.day_exceeds_mtd", {i.code for i in result["issues"]})
+        self.assertEqual(result["revenue_total"], -10.0)
+        self.assertEqual(result["revenue_per_day"], -11.0)
+        self.assertEqual(result["issues"], ())
 
     def test_installs_inconsistency_quarantines_only_installs_family(self):
         from daily_metric_integrity import validate_app_metrics
@@ -150,20 +149,29 @@ class TestDailyMetricAudit(unittest.TestCase):
         from daily_metric_integrity import emit_integrity_audit, validate_app_metrics
 
         row = valid_row()
-        row.update(revenue_total=10.0, revenue_per_day=11.0)
+        row.update(
+            revenue_total=None,
+            revenue_per_day=None,
+            issues=(IntegrityIssue(
+                code="revenue.source_invalid",
+                message="revenue source is invalid",
+                app_name=row["name"],
+                metric="revenue",
+            ),),
+        )
 
         with self.assertLogs("daily_metric_integrity", level="INFO") as captured:
             emit_integrity_audit(
                 report_date=date(2026, 8, 6),
                 timezone="Europe/Minsk",
-                rows=(validate_app_metrics(row),),
+                rows=(row,),
                 total_status={},
                 portfolio_issues=(),
             )
 
         revenue_lines = [line for line in captured.output if "metric=revenue_" in line]
         self.assertEqual(len(revenue_lines), 2)
-        self.assertTrue(all("issue=revenue.day_exceeds_mtd" in line for line in revenue_lines))
+        self.assertTrue(all("issue=revenue.source_invalid" in line for line in revenue_lines))
 
     def test_problem_count_deduplicates_issue_identity(self):
         from daily_metric_integrity import count_integrity_problems

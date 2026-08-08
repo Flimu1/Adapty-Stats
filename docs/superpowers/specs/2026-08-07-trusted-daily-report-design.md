@@ -115,10 +115,10 @@ Telegram number.
   values are invalid.
 - Installs and conversion counts must be non-negative mathematical integers;
   fractional counts are invalid and are never truncated.
-- MRR, ARR, Revenue, and their current daily points must be finite and
-  non-negative.
-- MRR, ARR, and Revenue deltas may be negative because portfolio performance
-  can decline.
+- MRR and ARR current points must be finite and non-negative; their deltas may
+  be negative because portfolio performance can decline.
+- Revenue summary and daily points must be finite but may be negative because
+  Adapty's gross series includes refund and reversal adjustments.
 - Conversion percentage must be finite and within 0–100.
 - Zero is valid and remains distinct from missing data.
 
@@ -136,8 +136,8 @@ Telegram number.
 
 ### Within-Metric Reconciliation
 
-- Revenue MTD must be greater than or equal to the non-negative report-day
-  Revenue point.
+- Revenue MTD and report-day Revenue are trusted independently because refund
+  timing can make either aggregate negative or make the daily point exceed MTD.
 - Installs MTD must be greater than or equal to report-day Installs.
 - Conversion requires `value_to <= value_from`.
 - When `value_from > 0`, the returned conversion percentage must match

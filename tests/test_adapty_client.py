@@ -151,6 +151,29 @@ class TestChartMetricParsing(unittest.TestCase):
         self.assertIsNone(_parse_chart_metric(negative_summary, "mrr"))
         self.assertIsNone(_parse_chart_metric(negative_point, "mrr"))
 
+    def test_revenue_accepts_negative_refund_points_from_gross_series(self):
+        from adapty_client import _parse_chart_metric
+
+        payload = {
+            "data": {
+                "revenue": {
+                    "value": 16.0,
+                    "data": [{
+                        "values": [
+                            {"x": "2026-08-01", "y": 68.0},
+                            {"x": "2026-08-02", "y": -52.0},
+                        ]
+                    }],
+                }
+            }
+        }
+
+        metric = _parse_chart_metric(payload, "revenue")
+
+        self.assertIsNotNone(metric)
+        self.assertEqual(metric.value, 16.0)
+        self.assertEqual(metric.daily_values, (68.0, -52.0))
+
 
 class TestConversionMetricParsing(unittest.TestCase):
     def test_preserves_percentage_and_raw_counts(self):

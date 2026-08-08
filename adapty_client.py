@@ -110,7 +110,7 @@ def _parse_chart_metric(
         value = float(count_value)
     else:
         parsed_value = _parse_finite_number(metric["value"])
-        if parsed_value is None or parsed_value < 0:
+        if parsed_value is None or (chart_id != "revenue" and parsed_value < 0):
             return None
         value = parsed_value
 
@@ -138,7 +138,7 @@ def _parse_chart_metric(
             point_value = float(point_count)
         else:
             parsed_point = _parse_finite_number(point.get("y"))
-            if parsed_point is None or parsed_point < 0:
+            if parsed_point is None or (chart_id != "revenue" and parsed_point < 0):
                 return None
             point_value = parsed_point
         daily_dates.append(point_date)
