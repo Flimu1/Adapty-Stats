@@ -121,6 +121,7 @@ class TestChartMetricParsing(unittest.TestCase):
 
         self.assertEqual(_parse_count("9007199254740993"), 9_007_199_254_740_993)
         self.assertIsNone(_parse_count("9007199254740993.5"))
+        self.assertIsNone(_parse_count(9_007_199_254_740_994.0))
 
     def test_does_not_fall_back_to_proceeds_for_gross_revenue_charts(self):
         from adapty_client import _parse_chart_metric
