@@ -78,8 +78,8 @@ def _parse_count(value: Any) -> Optional[int]:
     """Parse a non-negative mathematical integer without truncation."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, float) and abs(value) > 2**53:
-        # JSON floats above this boundary may already be rounded by the decoder.
+    if isinstance(value, float):
+        # JSON floats can be rounded before validation; counts must be exact.
         return None
     try:
         number = Decimal(str(value))
